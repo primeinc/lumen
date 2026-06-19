@@ -358,12 +358,22 @@ func pathsEqual(a, b string) bool {
 // otherwise escape the refusal. os.SameFile requires os.Stat results, so both
 // are stat'd here.
 func sameDir(a, b string) bool {
-	if ai, err := os.Stat(a); err == nil {
-		if bi, err := os.Stat(b); err == nil && os.SameFile(ai, bi) {
+	ai, err := os.Stat(a)
+	return sameDirWithInfo(ai, err, filepath.Clean(a), b)
+}
+
+// sameDirWithInfo is sameDir with a's os.Stat result supplied by the caller, so a
+// single stat of a can be reused across many candidate b values (e.g. the whole
+// refusedRoots set) instead of re-statting a on every comparison. aInfo / aErr
+// are os.Stat(a)'s results and cleanA is filepath.Clean(a); the os.SameFile
+// branch is taken only when aErr is nil and b also stats.
+func sameDirWithInfo(aInfo os.FileInfo, aErr error, cleanA, b string) bool {
+	if aErr == nil {
+		if bi, err := os.Stat(b); err == nil && os.SameFile(aInfo, bi) {
 			return true
 		}
 	}
-	return pathsEqual(filepath.Clean(a), filepath.Clean(b))
+	return pathsEqual(cleanA, filepath.Clean(b))
 }
 
 // matchesRefusedRoot reports whether dir is one of the refusedRoots. The fast
@@ -375,11 +385,20 @@ func sameDir(a, b string) bool {
 // case-insensitive filesystem os.SameFile already matches case variants of an
 // existing root, and sameDir's fallback already case-folds an absent one.
 func matchesRefusedRoot(dir, clean, resolved string) bool {
+	dirInfo, dirErr := os.Stat(dir)
+	return matchesRefusedRootWithInfo(dirInfo, dirErr, clean, resolved)
+}
+
+// matchesRefusedRootWithInfo is matchesRefusedRoot with dir's os.Stat result
+// supplied by the caller. The loop compares dir against every refused root, so
+// statting dir once here — rather than once per root inside sameDir — removes up
+// to len(refusedRoots) redundant syscalls per call.
+func matchesRefusedRootWithInfo(dirInfo os.FileInfo, dirErr error, clean, resolved string) bool {
 	if refusedRoots[clean] || refusedRoots[resolved] {
 		return true
 	}
 	for root := range refusedRoots {
-		if sameDir(dir, root) {
+		if sameDirWithInfo(dirInfo, dirErr, clean, root) {
 			return true
 		}
 	}
@@ -453,14 +472,18 @@ func IsRootUnindexable(dir string) (bool, string) {
 	// while the cleaned-input check keeps "/etc" itself matching.
 	clean := filepath.Clean(dir)
 	resolved := resolvePath(dir)
-	if matchesRefusedRoot(dir, clean, resolved) {
+	// Stat dir once and thread the result through every identity comparison below
+	// (refused roots, $HOME, each system temp dir) so dir is not re-stat'd once
+	// per candidate.
+	dirInfo, dirErr := os.Stat(dir)
+	if matchesRefusedRootWithInfo(dirInfo, dirErr, clean, resolved) {
 		return true, "hardcoded system root"
 	}
-	if home, err := os.UserHomeDir(); err == nil && sameDir(dir, home) {
+	if home, err := os.UserHomeDir(); err == nil && sameDirWithInfo(dirInfo, dirErr, clean, home) {
 		return true, "user home directory"
 	}
 	for _, tmp := range systemTempDirs() {
-		if sameDir(dir, tmp) {
+		if sameDirWithInfo(dirInfo, dirErr, clean, tmp) {
 			return true, "system temporary directory"
 		}
 	}
