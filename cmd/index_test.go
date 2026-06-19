@@ -15,10 +15,13 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ory/lumen/internal/index"
 )
 
 func TestRunIndex_RefusesUnindexableRoot(t *testing.T) {
@@ -55,7 +58,7 @@ func TestRunIndex_RefusesOversizedNestedRoot(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected runIndex to refuse an oversized nested root, got nil error")
 	}
-	if !strings.Contains(err.Error(), "nested git repositories") {
-		t.Fatalf("expected the nested-repo refusal, got %q", err.Error())
+	if !errors.Is(err, index.ErrTooManyNestedRepos) {
+		t.Fatalf("expected err to wrap index.ErrTooManyNestedRepos, got %q", err.Error())
 	}
 }

@@ -18,6 +18,7 @@ package index
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -136,12 +137,18 @@ func (idx *Indexer) Close() error {
 	return idx.store.Close()
 }
 
+// ErrTooManyNestedRepos is the sentinel wrapped by TooManyNestedReposError.
+// Callers that need to distinguish this refusal from other indexing errors
+// should match it with errors.Is rather than comparing the message string.
+var ErrTooManyNestedRepos = errors.New("too many nested git repositories")
+
 // TooManyNestedReposError formats the refusal used when a non-git root contains
 // more nested git repositories than the configured limit — a signal it is a
 // workspace/home/temp directory rather than a single project. count is the
-// number discovered before discovery stopped at the limit.
+// number discovered before discovery stopped at the limit. The result wraps
+// ErrTooManyNestedRepos so it can be matched with errors.Is.
 func TooManyNestedReposError(root string, count int) error {
-	return fmt.Errorf("refusing to index %s: more than the limit of %d nested git repositories — this looks like a workspace/home/temp directory, not a single project; point lumen at a specific repository, or raise LUMEN_MAX_NESTED_REPOS", root, count)
+	return fmt.Errorf("refusing to index %s: %w — found more than the limit of %d (this looks like a workspace/home/temp directory, not a single project); point lumen at a specific repository, or raise LUMEN_MAX_NESTED_REPOS", root, ErrTooManyNestedRepos, count)
 }
 
 // makeSkip returns a SkipFunc for projectDir that excludes internal worktrees
