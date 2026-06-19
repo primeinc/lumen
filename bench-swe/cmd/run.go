@@ -13,12 +13,13 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/aeneasr/lumen/bench-swe/internal/judge"
-	"github.com/aeneasr/lumen/bench-swe/internal/preflight"
-	"github.com/aeneasr/lumen/bench-swe/internal/report"
-	"github.com/aeneasr/lumen/bench-swe/internal/runner"
-	"github.com/aeneasr/lumen/bench-swe/internal/task"
-	"github.com/aeneasr/lumen/bench-swe/internal/tui"
+	"github.com/ory/lumen/bench-swe/internal/judge"
+	"github.com/ory/lumen/bench-swe/internal/platform"
+	"github.com/ory/lumen/bench-swe/internal/preflight"
+	"github.com/ory/lumen/bench-swe/internal/report"
+	"github.com/ory/lumen/bench-swe/internal/runner"
+	"github.com/ory/lumen/bench-swe/internal/task"
+	"github.com/ory/lumen/bench-swe/internal/tui"
 )
 
 var (
@@ -67,7 +68,7 @@ func runBenchmarks(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	repoRoot := filepath.Dir(benchDir)
-	lumenBinary := filepath.Join(repoRoot, "bin", "lumen")
+	lumenBinary := platform.Resolve(filepath.Join(repoRoot, "bin"), "lumen")
 	tasksDir := filepath.Join(benchDir, "tasks")
 
 	// Detect backend

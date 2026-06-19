@@ -6,12 +6,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
-	"github.com/aeneasr/lumen/bench-swe/internal/runner"
+	"github.com/ory/lumen/bench-swe/internal/platform"
+	"github.com/ory/lumen/bench-swe/internal/runner"
 )
 
 type Config struct {
@@ -46,39 +45,19 @@ func Validate(ctx context.Context, cfg *Config) error {
 }
 
 func buildLumen(ctx context.Context, cfg *Config) error {
-	// Reuse an existing working binary (e.g. the official prebuilt release artifact)
-	// instead of forcing a CGO rebuild. On Windows the CGO/sqlite-vec toolchain often
-	// isn't set up, and the prebuilt binary is identical in function. Copy/build to a
-	// path that carries the .exe extension on Windows: Go's exec won't run a bare
-	// extensionless file, but resolves `bin/lumen` -> `bin/lumen.exe`, so the runner
-	// and MCP launcher (which exec cfg.LumenBinary unchanged) still work.
-	targetBinary := cfg.LumenBinary
-	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(targetBinary), ".exe") {
-		targetBinary += ".exe"
-	}
-	binDir := filepath.Dir(targetBinary)
-	for _, name := range []string{
-		filepath.Base(targetBinary),
-		"lumen-windows-amd64.exe",
-		"lumen.exe",
-	} {
-		cand := filepath.Join(binDir, name)
-		if !lumenRuns(ctx, cand) {
-			continue
-		}
-		if cand != targetBinary {
-			if err := copyExecutable(cand, targetBinary); err != nil {
-				return fmt.Errorf("reusing prebuilt %s: %w", cand, err)
-			}
-		}
-		fmt.Println("  Reusing prebuilt lumen: " + cand)
+	// cfg.LumenBinary is resolved in cmd.run to an existing binary when one is
+	// present (the prebuilt release artifact), so prefer reusing it — it is
+	// identical in function and avoids a CGO/sqlite-vec rebuild this host may not
+	// be able to do. Build from source only when no working binary was found.
+	if lumenRuns(ctx, cfg.LumenBinary) {
+		fmt.Println("  Using lumen: " + cfg.LumenBinary)
 		return nil
 	}
 
 	fmt.Print("  Building lumen... ")
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", targetBinary, ".")
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", cfg.LumenBinary, ".")
 	cmd.Dir = cfg.RepoRoot
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED="+platform.DefaultCGO)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w\n%s", err, out)
 	}
@@ -94,18 +73,6 @@ func lumenRuns(ctx context.Context, path string) bool {
 	c, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	return exec.CommandContext(c, path, "version").Run() == nil
-}
-
-// copyExecutable copies src to dst (overwriting) and marks it executable.
-func copyExecutable(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(dst, data, 0o755); err != nil {
-		return err
-	}
-	return os.Chmod(dst, 0o755)
 }
 
 func checkOllama(cfg *Config) error {
