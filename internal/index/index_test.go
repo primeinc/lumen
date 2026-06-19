@@ -833,8 +833,8 @@ func TestMakeSkip_RefusesOversizedRoot(t *testing.T) {
 		if skip != nil {
 			t.Error("makeSkip should return a nil SkipFunc when it refuses")
 		}
-		if !strings.Contains(err.Error(), "nested git repositories") {
-			t.Errorf("error should explain the nested-repo refusal, got %q", err.Error())
+		if !errors.Is(err, ErrTooManyNestedRepos) {
+			t.Errorf("error should wrap ErrTooManyNestedRepos, got %q", err.Error())
 		}
 	})
 
