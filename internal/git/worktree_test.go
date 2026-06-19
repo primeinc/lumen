@@ -374,6 +374,51 @@ func TestDiscoverNestedGitRepos_BoundsRunawayWalk(t *testing.T) {
 			t.Errorf("returned %d repos, want the override cap 10", len(repos))
 		}
 	})
+
+	t.Run("boundary is exact at the cap (cap vs cap+1)", func(t *testing.T) {
+		// Pin the off-by-one in `len(repos) >= limit`: exactly `limit` repos must
+		// NOT truncate, and exactly limit+1 MUST. The other subtests use loose
+		// gaps (cap+25, 5-vs-64) and would not catch a one-off boundary slip. Use
+		// a small override so the test stays fast.
+		t.Setenv("LUMEN_MAX_NESTED_REPOS", "4")
+
+		atLimit := makeRepos(t, 4)
+		repos, truncated := DiscoverNestedGitRepos(atLimit)
+		if truncated {
+			t.Error("truncated = true at exactly the limit (4), want false")
+		}
+		if len(repos) != 4 {
+			t.Errorf("returned %d repos at the limit, want 4", len(repos))
+		}
+
+		overLimit := makeRepos(t, 5)
+		repos, truncated = DiscoverNestedGitRepos(overLimit)
+		if !truncated {
+			t.Error("truncated = false at limit+1 (5), want true")
+		}
+		if len(repos) != 4 {
+			t.Errorf("returned %d repos at limit+1, want the cap 4", len(repos))
+		}
+	})
+}
+
+// TestMaxNestedReposLimit_FailsSafeOnMalformedEnv pins the security-relevant
+// fail-safe: a malformed LUMEN_MAX_NESTED_REPOS must never widen or disable the
+// runaway-walk guard. The existing discovery tests only ever set positive
+// overrides, so a regression that returned 0 (uncapped) or honored a negative
+// would pass unnoticed. Only a value that parses as a positive int may override.
+func TestMaxNestedReposLimit_FailsSafeOnMalformedEnv(t *testing.T) {
+	for _, v := range []string{"", "0", "-1", "-64", "abc", "  ", "64x", "99999999999999999999"} {
+		t.Setenv("LUMEN_MAX_NESTED_REPOS", v)
+		if got := maxNestedReposLimit(); got != DefaultMaxNestedRepos {
+			t.Errorf("maxNestedReposLimit() with LUMEN_MAX_NESTED_REPOS=%q = %d, want default %d", v, got, DefaultMaxNestedRepos)
+		}
+	}
+
+	t.Setenv("LUMEN_MAX_NESTED_REPOS", "7")
+	if got := maxNestedReposLimit(); got != 7 {
+		t.Errorf("maxNestedReposLimit() with valid override %q = %d, want 7", "7", got)
+	}
 }
 
 func run(t *testing.T, dir string, name string, args ...string) {
