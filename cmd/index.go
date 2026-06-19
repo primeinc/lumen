@@ -76,6 +76,15 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	emb := newEmbedder(cfg)
 	emb.SetLogger(logger)
 
+	// Fail fast when no embedding backend is reachable. Indexing with a dead
+	// backend embeds nothing — every batch fails — and (before the root and
+	// nested-walk guards) produced the 2026-06-19 runaway storm. Skipping here
+	// keeps Lumen usable when the backend (e.g. Ollama) is down, rather than
+	// requiring it to always be running.
+	if !emb.Healthy() {
+		return fmt.Errorf("refusing to index %s: no healthy embedding server (is the backend running?)", projectPath)
+	}
+
 	modelName := emb.ModelName()
 
 	// Normalize to the git repository root when inside a git repo so that

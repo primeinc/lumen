@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -319,6 +320,24 @@ func TestDiscoverNestedGitRepos_DoesNotDescendIntoGitRepo(t *testing.T) {
 	got, _ := filepath.EvalSymlinks(repos[0])
 	if got != resolved {
 		t.Errorf("expected %q, got %q", resolved, got)
+	}
+}
+
+func TestDiscoverNestedGitRepos_BoundsRunawayWalk(t *testing.T) {
+	// Regression for the 2026-06-19 runaway-indexing incident: a non-git root
+	// holding hundreds of nested repos (a workspace directory, or C:\WINDOWS\TEMP)
+	// must not be walked without bound. A .git dir satisfies IsGitRoot, so fake
+	// repos keep this fast and git-free.
+	parent := t.TempDir()
+	for i := range maxNestedRepos + 25 {
+		repo := filepath.Join(parent, "repo"+strconv.Itoa(i))
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repos := DiscoverNestedGitRepos(parent)
+	if len(repos) != maxNestedRepos {
+		t.Errorf("DiscoverNestedGitRepos returned %d repos, want exactly the cap %d", len(repos), maxNestedRepos)
 	}
 }
 

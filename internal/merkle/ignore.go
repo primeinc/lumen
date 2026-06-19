@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -333,6 +334,63 @@ func resolvePath(dir string) string {
 	return filepath.Clean(dir)
 }
 
+// pathsEqual compares two cleaned paths. On Windows the filesystem is
+// case-insensitive and the OS reports system paths with inconsistent casing
+// (e.g. C:\WINDOWS vs C:\Windows), so the comparison folds case there; on other
+// platforms it is exact.
+func pathsEqual(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// matchesRefusedRoot reports whether the cleaned or symlink-resolved form of an
+// input path is in refusedRoots. The fast path is an exact map lookup; on
+// Windows it additionally folds case so the OS-reported C:\WINDOWS matches the
+// C:\Windows entry.
+func matchesRefusedRoot(clean, resolved string) bool {
+	if refusedRoots[clean] || refusedRoots[resolved] {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		for root := range refusedRoots {
+			if strings.EqualFold(root, clean) || strings.EqualFold(root, resolved) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// systemTempDirs returns the cleaned and symlink-resolved temporary directories
+// that must never be an index root: os.TempDir() plus the %TEMP%/%TMP%
+// environment values on Windows (where a background or service process commonly
+// runs with TEMP=C:\WINDOWS\TEMP). The system temp tree is large,
+// machine-managed, and routinely full of unrelated nested git repositories
+// (test fixtures, clones), so indexing it walks the entire tree.
+func systemTempDirs() []string {
+	var dirs []string
+	seen := make(map[string]bool)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		for _, c := range []string{filepath.Clean(p), resolvePath(p)} {
+			if c != "" && !seen[c] {
+				seen[c] = true
+				dirs = append(dirs, c)
+			}
+		}
+	}
+	add(os.TempDir())
+	if runtime.GOOS == "windows" {
+		add(os.Getenv("TEMP"))
+		add(os.Getenv("TMP"))
+	}
+	return dirs
+}
+
 // IsRootUnindexable reports whether dir is unsuitable as a Lumen index root.
 // When true, the returned string is a short human-readable reason suitable for
 // inclusion in an error message. When false, the reason is empty.
@@ -357,7 +415,7 @@ func IsRootUnindexable(dir string) (bool, string) {
 	// while the cleaned-input check keeps "/etc" itself matching.
 	clean := filepath.Clean(dir)
 	resolved := resolvePath(dir)
-	if refusedRoots[clean] || refusedRoots[resolved] {
+	if matchesRefusedRoot(clean, resolved) {
 		return true, "hardcoded system root"
 	}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -365,6 +423,11 @@ func IsRootUnindexable(dir string) (bool, string) {
 		homeResolved := resolvePath(home)
 		if homeClean == clean || homeClean == resolved || homeResolved == clean || homeResolved == resolved {
 			return true, "user home directory"
+		}
+	}
+	for _, tmp := range systemTempDirs() {
+		if pathsEqual(clean, tmp) || pathsEqual(resolved, tmp) {
+			return true, "system temporary directory"
 		}
 	}
 

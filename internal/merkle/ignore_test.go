@@ -177,6 +177,48 @@ func TestIsRootUnindexable(t *testing.T) {
 		}
 	})
 
+	t.Run("system temp directory is refused", func(t *testing.T) {
+		// Regression for the 2026-06-19 runaway-indexing incident: Lumen indexed
+		// C:\WINDOWS\TEMP and walked its entire nested-repo tree because TEMP is a
+		// *subdir* of C:\Windows and slipped the exact-key refusal check. The OS
+		// temp dir (and %TEMP%/%TMP% on Windows) must be refused outright.
+		if got, reason := IsRootUnindexable(os.TempDir()); !got || reason == "" {
+			t.Errorf("expected os.TempDir() %q to be refused, got=%v reason=%q", os.TempDir(), got, reason)
+		}
+		if runtime.GOOS == "windows" {
+			for _, p := range []string{`C:\WINDOWS\TEMP`, os.Getenv("TEMP"), os.Getenv("TMP")} {
+				if p == "" {
+					continue
+				}
+				if _, err := os.Stat(p); err != nil {
+					continue
+				}
+				got, reason := IsRootUnindexable(p)
+				if !got {
+					t.Errorf("expected Windows temp dir %q to be refused as an index root", p)
+				}
+				if reason != "system temporary directory" {
+					t.Errorf("reason for %q = %q, want %q", p, reason, "system temporary directory")
+				}
+			}
+		}
+	})
+
+	t.Run("windows system root match is case-insensitive", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("windows-only path casing")
+		}
+		// The OS reports C:\WINDOWS while the refusal list holds C:\Windows; the
+		// exact-key map missed this. Refusal must be case-insensitive on Windows.
+		got, reason := IsRootUnindexable(`C:\WINDOWS`)
+		if !got {
+			t.Errorf("expected C:\\WINDOWS to be refused via case-insensitive match")
+		}
+		if reason != "hardcoded system root" {
+			t.Errorf("reason = %q, want %q", reason, "hardcoded system root")
+		}
+	})
+
 	t.Run("symlink to home is refused", func(t *testing.T) {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -219,6 +261,26 @@ func TestIsRootUnindexable(t *testing.T) {
 			t.Errorf("expected %q to be indexable (no .lumenignore, not hardcoded)", dir)
 		}
 	})
+}
+
+// TestMatchesRefusedRoot_CaseInsensitiveOnWindows exercises the case-fold scan
+// directly, independent of resolvePath/EvalSymlinks. The "windows system root
+// match is case-insensitive" subtest in TestIsRootUnindexable passes even on the
+// old code on a real Windows disk, because EvalSymlinks normalizes C:\WINDOWS to
+// the on-disk casing C:\Windows (a refusedRoots key) — so it does not actually
+// prove the fold loop. Passing the same case-mismatched, non-canonical value as
+// both clean and resolved bypasses that laundering: deleting the case-fold branch
+// in matchesRefusedRoot makes this test fail.
+func TestMatchesRefusedRoot_CaseInsensitiveOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("case-fold branch is Windows-only")
+	}
+	if !matchesRefusedRoot(`C:\PROGRAMDATA`, `C:\PROGRAMDATA`) {
+		t.Error(`matchesRefusedRoot("C:\PROGRAMDATA") = false, want true (case-fold of refusedRoots key "C:\ProgramData")`)
+	}
+	if matchesRefusedRoot(`C:\Users\someone\a-project`, `C:\Users\someone\a-project`) {
+		t.Error("matchesRefusedRoot(a normal project path) = true, want false")
+	}
 }
 
 func TestMakeSkip_HardcodedFiles(t *testing.T) {
@@ -679,4 +741,3 @@ func TestIgnoreTree_GlobalGitignore(t *testing.T) {
 		t.Error("main.go should not be skipped")
 	}
 }
-

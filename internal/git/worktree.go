@@ -122,9 +122,17 @@ func IsGitRoot(path string) bool {
 	return err == nil
 }
 
-// DiscoverNestedGitRepos walks rootPath and returns absolute paths of all
-// nested directories that are git repo roots. It stops descending into
-// discovered repos. Returns nil if rootPath is itself a git root or contains
+// maxNestedRepos bounds how many nested git repositories DiscoverNestedGitRepos
+// returns from a single non-git root. A non-git directory holding more than this
+// many nested repos is not a meaningful single index root — it is a home or
+// workspace directory, or the system temp tree. Indexing every nested repo under
+// such a root can fan out without bound (one stray root pointed at a tree full of
+// clones or fixtures), so the walk stops once the cap is reached.
+const maxNestedRepos = 64
+
+// DiscoverNestedGitRepos walks rootPath and returns absolute paths of nested
+// directories that are git repo roots, up to maxNestedRepos. It stops descending
+// into discovered repos. Returns nil if rootPath is itself a git root or contains
 // no nested repos.
 func DiscoverNestedGitRepos(rootPath string) []string {
 	if IsGitRoot(rootPath) {
@@ -144,6 +152,9 @@ func DiscoverNestedGitRepos(rootPath string) []string {
 		}
 		if IsGitRoot(path) {
 			repos = append(repos, path)
+			if len(repos) >= maxNestedRepos {
+				return filepath.SkipAll
+			}
 			return filepath.SkipDir
 		}
 		return nil
