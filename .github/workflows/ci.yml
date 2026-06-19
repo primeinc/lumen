@@ -48,6 +48,30 @@ jobs:
       - name: Vet
         run: go vet -tags=fts5 ./...
 
+  test-windows:
+    name: Test (windows path identity)
+    runs-on: windows-latest
+    if: github.actor != 'release-please[bot]'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # The main `test` job is Linux-only, so every assertion guarded by
+      # `runtime.GOOS == "windows"` — case-insensitive root matching, 8.3 short
+      # names, os.SameFile identity, the C:\Windows\Temp refusal — never executes
+      # in CI. Run the CGO-free packages that carry those assertions on a real
+      # Windows runner. CGO is intentionally disabled: merkle/git/embedder need no
+      # sqlite-vec/tree-sitter, so this needs no C toolchain and stays fast.
+      - name: Go test (path-identity packages)
+        run: go test ./internal/merkle/... ./internal/git/... ./internal/embedder/...
+        env:
+          CGO_ENABLED: '0'
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
