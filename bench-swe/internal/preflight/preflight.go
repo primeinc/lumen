@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -44,6 +45,30 @@ func Validate(ctx context.Context, cfg *Config) error {
 }
 
 func buildLumen(ctx context.Context, cfg *Config) error {
+	// Reuse an existing working binary (e.g. the official prebuilt release artifact)
+	// instead of forcing a CGO rebuild. On Windows the CGO/sqlite-vec toolchain often
+	// isn't set up, and the prebuilt binary is identical in function. Copy it to the
+	// path the runner and MCP launcher exec (cfg.LumenBinary) so nothing else changes.
+	binDir := filepath.Dir(cfg.LumenBinary)
+	for _, name := range []string{
+		filepath.Base(cfg.LumenBinary),
+		filepath.Base(cfg.LumenBinary) + ".exe",
+		"lumen-windows-amd64.exe",
+		"lumen.exe",
+	} {
+		cand := filepath.Join(binDir, name)
+		if !lumenRuns(ctx, cand) {
+			continue
+		}
+		if cand != cfg.LumenBinary {
+			if err := copyExecutable(cand, cfg.LumenBinary); err != nil {
+				return fmt.Errorf("reusing prebuilt %s: %w", cand, err)
+			}
+		}
+		fmt.Println("  Reusing prebuilt lumen: " + cand)
+		return nil
+	}
+
 	fmt.Print("  Building lumen... ")
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", cfg.LumenBinary, ".")
 	cmd.Dir = cfg.RepoRoot
@@ -53,6 +78,28 @@ func buildLumen(ctx context.Context, cfg *Config) error {
 	}
 	fmt.Println("ok")
 	return nil
+}
+
+// lumenRuns reports whether the binary at path exists and executes `version` cleanly.
+func lumenRuns(ctx context.Context, path string) bool {
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	c, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return exec.CommandContext(c, path, "version").Run() == nil
+}
+
+// copyExecutable copies src to dst (overwriting) and marks it executable.
+func copyExecutable(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(dst, data, 0o755); err != nil {
+		return err
+	}
+	return os.Chmod(dst, 0o755)
 }
 
 func checkOllama(cfg *Config) error {
