@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/aeneasr/lumen/bench-swe/cmd"
+	"github.com/ory/lumen/bench-swe/cmd"
 )
 
 func main() {

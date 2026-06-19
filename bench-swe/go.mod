@@ -1,4 +1,4 @@
-module github.com/aeneasr/lumen/bench-swe
+module github.com/ory/lumen/bench-swe
 
 go 1.25.0
 

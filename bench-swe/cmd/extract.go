@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/aeneasr/lumen/bench-swe/internal/analysis"
+	"github.com/ory/lumen/bench-swe/internal/analysis"
 )
 
 var (

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aeneasr/lumen/bench-swe/internal/judge"
-	"github.com/aeneasr/lumen/bench-swe/internal/metrics"
-	"github.com/aeneasr/lumen/bench-swe/internal/runner"
-	"github.com/aeneasr/lumen/bench-swe/internal/task"
+	"github.com/ory/lumen/bench-swe/internal/judge"
+	"github.com/ory/lumen/bench-swe/internal/metrics"
+	"github.com/ory/lumen/bench-swe/internal/runner"
+	"github.com/ory/lumen/bench-swe/internal/task"
 )
 
 func TestFindResult(t *testing.T) {

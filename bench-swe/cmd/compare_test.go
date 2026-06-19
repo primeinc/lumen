@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aeneasr/lumen/bench-swe/internal/metrics"
+	"github.com/ory/lumen/bench-swe/internal/metrics"
 )
 
 func TestDiscoverPairs(t *testing.T) {

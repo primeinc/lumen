@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aeneasr/lumen/bench-swe/internal/metrics"
-	"github.com/aeneasr/lumen/bench-swe/internal/task"
+	"github.com/ory/lumen/bench-swe/internal/metrics"
+	"github.com/ory/lumen/bench-swe/internal/task"
 )
 
 type Config struct {

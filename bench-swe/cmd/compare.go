@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/aeneasr/lumen/bench-swe/internal/judge"
-	"github.com/aeneasr/lumen/bench-swe/internal/metrics"
+	"github.com/ory/lumen/bench-swe/internal/judge"
+	"github.com/ory/lumen/bench-swe/internal/metrics"
 )
 
 var compareCmd = &cobra.Command{

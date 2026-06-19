@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/aeneasr/lumen/bench-swe/internal/runner"
-	"github.com/aeneasr/lumen/bench-swe/internal/task"
+	"github.com/ory/lumen/bench-swe/internal/runner"
+	"github.com/ory/lumen/bench-swe/internal/task"
 )
 
 // withLumenRawFiles returns all raw JSONL paths for the with-lumen scenario

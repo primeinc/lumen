@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/aeneasr/lumen/bench-swe/internal/task"
-	"github.com/aeneasr/lumen/bench-swe/internal/tui"
+	"github.com/ory/lumen/bench-swe/internal/task"
+	"github.com/ory/lumen/bench-swe/internal/tui"
 )
 
 const grepScoreThreshold = 0.5
