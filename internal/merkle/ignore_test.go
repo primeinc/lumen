@@ -177,6 +177,59 @@ func TestIsRootUnindexable(t *testing.T) {
 		}
 	})
 
+	t.Run("system temp directory is refused", func(t *testing.T) {
+		// Regression for the 2026-06-19 runaway-indexing incident: Lumen indexed
+		// C:\WINDOWS\TEMP and walked its entire nested-repo tree. The OS temp dir
+		// must be refused, and — independent of this process's TEMP/TMP — so must
+		// the Windows SYSTEM temp dirs %SystemRoot%\Temp and %SystemRoot%\SystemTemp
+		// (the dirs a service/background process gets per Win32 GetTempPath /
+		// GetTempPath2). Deriving them from %SystemRoot% rather than hardcoding
+		// C:\WINDOWS\TEMP keeps this deterministic on any host, including a clean
+		// runner where os.TempDir() is %LOCALAPPDATA%\Temp.
+		if got, reason := IsRootUnindexable(os.TempDir()); !got || reason == "" {
+			t.Errorf("expected os.TempDir() %q to be refused, got=%v reason=%q", os.TempDir(), got, reason)
+		}
+		if runtime.GOOS != "windows" {
+			return
+		}
+		candidates := []string{os.Getenv("TEMP"), os.Getenv("TMP")}
+		if sysRoot := os.Getenv("SystemRoot"); sysRoot != "" {
+			candidates = append(candidates, filepath.Join(sysRoot, "Temp"), filepath.Join(sysRoot, "SystemTemp"))
+		}
+		for _, p := range candidates {
+			if p == "" {
+				continue
+			}
+			// SystemTemp only exists on newer builds; skip any candidate that is
+			// not present rather than asserting on a dir the host does not have.
+			if _, err := os.Stat(p); err != nil {
+				continue
+			}
+			got, reason := IsRootUnindexable(p)
+			if !got {
+				t.Errorf("expected Windows system temp dir %q to be refused as an index root", p)
+			}
+			if reason != "system temporary directory" {
+				t.Errorf("reason for %q = %q, want %q", p, reason, "system temporary directory")
+			}
+		}
+	})
+
+	t.Run("windows system root match is case-insensitive", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("windows-only path casing")
+		}
+		// The OS reports C:\WINDOWS while the refusal list holds C:\Windows; the
+		// exact-key map missed this. Refusal must be case-insensitive on Windows.
+		got, reason := IsRootUnindexable(`C:\WINDOWS`)
+		if !got {
+			t.Errorf("expected C:\\WINDOWS to be refused via case-insensitive match")
+		}
+		if reason != "hardcoded system root" {
+			t.Errorf("reason = %q, want %q", reason, "hardcoded system root")
+		}
+	})
+
 	t.Run("symlink to home is refused", func(t *testing.T) {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -219,6 +272,55 @@ func TestIsRootUnindexable(t *testing.T) {
 			t.Errorf("expected %q to be indexable (no .lumenignore, not hardcoded)", dir)
 		}
 	})
+}
+
+// TestMatchesRefusedRoot_CaseInsensitiveOnWindows verifies that a refused root
+// supplied in non-canonical casing still matches. On a real Windows disk this is
+// resolved by os.SameFile inside sameDir: C:\PROGRAMDATA and the refusedRoots
+// key C:\ProgramData are the same directory on a case-insensitive filesystem, so
+// they share a file ID. The absent / unconfirmed path that falls back to a
+// case-folded string compare is covered directly by TestSameDir.
+func TestMatchesRefusedRoot_CaseInsensitiveOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("case-insensitive root matching is exercised on Windows")
+	}
+	if !matchesRefusedRoot(`C:\PROGRAMDATA`, `C:\PROGRAMDATA`, `C:\PROGRAMDATA`) {
+		t.Error(`matchesRefusedRoot("C:\PROGRAMDATA") = false, want true (refusedRoots holds "C:\ProgramData"; matched via os.SameFile)`)
+	}
+	if matchesRefusedRoot(`C:\Users\someone\a-project`, `C:\Users\someone\a-project`, `C:\Users\someone\a-project`) {
+		t.Error("matchesRefusedRoot(a normal project path) = true, want false")
+	}
+}
+
+// TestSameDir covers sameDir directly — in particular the string-compare
+// fallback that runs whenever os.SameFile cannot confirm identity (either path
+// absent, or stat-able but not openable). That fallback is the only guard for
+// refused roots not present on this host, so it must have executing coverage.
+func TestSameDir(t *testing.T) {
+	tmp := t.TempDir()
+
+	if !sameDir(tmp, tmp) {
+		t.Error("sameDir(tmp, tmp) = false, want true for an existing directory")
+	}
+
+	absent := filepath.Join(tmp, "does-not-exist-abc")
+	absentSame := filepath.Join(tmp, "does-not-exist-abc")
+	if !sameDir(absent, absentSame) {
+		t.Error("sameDir(identical absent paths) = false, want true")
+	}
+	absentOther := filepath.Join(tmp, "does-not-exist-xyz")
+	if sameDir(absent, absentOther) {
+		t.Error("sameDir(distinct absent paths) = true, want false")
+	}
+
+	absentUpper := filepath.Join(tmp, "DOES-NOT-EXIST-ABC")
+	if runtime.GOOS == "windows" {
+		if !sameDir(absent, absentUpper) {
+			t.Error("sameDir(absent case-variant paths) = false on Windows, want true (closes the case bypass for absent roots)")
+		}
+	} else if sameDir(absent, absentUpper) {
+		t.Error("sameDir(absent case-variant paths) = true on a case-sensitive OS, want false")
+	}
 }
 
 func TestMakeSkip_HardcodedFiles(t *testing.T) {
@@ -679,4 +781,3 @@ func TestIgnoreTree_GlobalGitignore(t *testing.T) {
 		t.Error("main.go should not be skipped")
 	}
 }
-

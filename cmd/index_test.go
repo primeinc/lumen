@@ -35,3 +35,27 @@ func TestRunIndex_RefusesUnindexableRoot(t *testing.T) {
 		t.Fatalf("expected error to mention the .lumenignore catch-all reason, got %q", err.Error())
 	}
 }
+
+func TestRunIndex_RefusesOversizedNestedRoot(t *testing.T) {
+	// A non-git directory holding more nested git repos than the limit is a
+	// workspace/home/temp dir, not a single project. runIndex must refuse it up
+	// front — before the embedding-backend check and before indexing any nested
+	// repo — so the 2026-06-19 runaway-indexing incident cannot recur from the
+	// CLI. A .git dir satisfies IsGitRoot, so fake repos keep this fast and
+	// backend-free; the low cap keeps the fixture small.
+	t.Setenv("LUMEN_MAX_NESTED_REPOS", "2")
+	dir := t.TempDir()
+	for _, name := range []string{"a", "b", "c", "d", "e"} {
+		if err := os.MkdirAll(filepath.Join(dir, name, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := runIndex(indexCmd, []string{dir})
+	if err == nil {
+		t.Fatal("expected runIndex to refuse an oversized nested root, got nil error")
+	}
+	if !strings.Contains(err.Error(), "nested git repositories") {
+		t.Fatalf("expected the nested-repo refusal, got %q", err.Error())
+	}
+}

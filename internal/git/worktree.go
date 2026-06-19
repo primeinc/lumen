@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -122,16 +123,46 @@ func IsGitRoot(path string) bool {
 	return err == nil
 }
 
-// DiscoverNestedGitRepos walks rootPath and returns absolute paths of all
-// nested directories that are git repo roots. It stops descending into
-// discovered repos. Returns nil if rootPath is itself a git root or contains
-// no nested repos.
-func DiscoverNestedGitRepos(rootPath string) []string {
+// DefaultMaxNestedRepos is the default cap on how many nested git repositories
+// DiscoverNestedGitRepos returns from a single non-git root, overridable via the
+// LUMEN_MAX_NESTED_REPOS environment variable. A non-git directory holding more
+// than this many nested repos is not a meaningful single index root — it is a
+// home or workspace directory, or the system temp tree — and the caller refuses
+// such a root outright rather than indexing a partial, misleading subset.
+const DefaultMaxNestedRepos = 64
+
+// maxNestedReposLimit returns the nested-repo cap. A LUMEN_MAX_NESTED_REPOS
+// value that parses as a positive integer overrides DefaultMaxNestedRepos; any
+// other value (empty, zero, negative, or non-numeric) falls back to the default.
+// The fallback is intentional and fail-safe — a malformed override never widens
+// or disables the guard. It is deliberately not logged here: this helper runs on
+// both the interactive `lumen index` path and the background indexer whose
+// stderr is discarded, so a warning would either be swallowed or violate the
+// repo's tui-vs-slog output separation. The refusal message names the variable,
+// which is the operator's signal to re-check the value.
+func maxNestedReposLimit() int {
+	if v := os.Getenv("LUMEN_MAX_NESTED_REPOS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return DefaultMaxNestedRepos
+}
+
+// DiscoverNestedGitRepos walks rootPath and returns the absolute paths of nested
+// directories that are git repo roots, up to the limit (LUMEN_MAX_NESTED_REPOS,
+// default DefaultMaxNestedRepos). It stops descending into discovered repos.
+// truncated is true when rootPath holds MORE than the limit; the caller should
+// treat such a root as not a meaningful single index root and refuse it, rather
+// than index a partial subset and leave the overflow to pollute the parent
+// index. Returns (nil, false) if rootPath is itself a git root or has no nested
+// repos.
+func DiscoverNestedGitRepos(rootPath string) (repos []string, truncated bool) {
 	if IsGitRoot(rootPath) {
-		return nil
+		return nil, false
 	}
 
-	var repos []string
+	limit := maxNestedReposLimit()
 	_ = filepath.WalkDir(rootPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return filepath.SkipDir
@@ -143,12 +174,16 @@ func DiscoverNestedGitRepos(rootPath string) []string {
 			return nil
 		}
 		if IsGitRoot(path) {
+			if len(repos) >= limit {
+				truncated = true
+				return filepath.SkipAll
+			}
 			repos = append(repos, path)
 			return filepath.SkipDir
 		}
 		return nil
 	})
-	return repos
+	return repos, truncated
 }
 
 // ListWorktrees returns the absolute paths of all worktrees (including the

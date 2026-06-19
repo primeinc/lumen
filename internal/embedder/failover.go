@@ -68,6 +68,17 @@ func (f *FailoverEmbedder) ActiveServerIndex() int {
 	return f.active
 }
 
+// Healthy probes the configured embedding servers (lazily, the same way Embed
+// does) and reports whether at least one is currently reachable. Callers use it
+// to fail fast before starting indexing when the backend is down, instead of
+// churning through embed batches that all fail. Lumen must remain usable when
+// the backend (e.g. Ollama) is not running; this is the gate that makes that so.
+func (f *FailoverEmbedder) Healthy() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maybeReprobe(true) >= 0
+}
+
 // maybeReprobe checks whether servers need (re-)initialization and does so
 // if required. Must be called with f.mu held. Returns the current active index.
 func (f *FailoverEmbedder) maybeReprobe(log bool) int {

@@ -98,7 +98,23 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	// When the project directory is not a git repo, discover nested git repos
 	// and index each one separately before indexing the parent (which will
 	// only contain "loose" files not belonging to any nested repo).
-	for _, repo := range git.DiscoverNestedGitRepos(projectPath) {
+	nestedRepos, tooManyNested := git.DiscoverNestedGitRepos(projectPath)
+	if tooManyNested {
+		return index.TooManyNestedReposError(projectPath, len(nestedRepos))
+	}
+
+	// Fail fast when no embedding backend is reachable. Indexing with a dead
+	// backend embeds nothing — every batch fails — and (before the root and
+	// nested-walk guards) produced the 2026-06-19 runaway storm. Checked after
+	// the cheap local refusals so an oversized root or system path is reported
+	// precisely instead of being masked by a "backend down" error; this keeps
+	// Lumen usable when the backend (e.g. Ollama) is down rather than requiring
+	// it to always be running.
+	if !emb.Healthy() {
+		return fmt.Errorf("refusing to index %s: no healthy embedding server (is the backend running?)", projectPath)
+	}
+
+	for _, repo := range nestedRepos {
 		p := tui.NewProgress(os.Stderr)
 		p.Info(fmt.Sprintf("Indexing nested repo %s", repo))
 		stats, elapsed, skipped, err := runIndexer(cmd, cfg, emb, repo, p, logger)

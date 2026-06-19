@@ -104,6 +104,35 @@ func TestFailover_FirstHealthy(t *testing.T) {
 	}
 }
 
+func TestFailover_Healthy(t *testing.T) {
+	// Healthy() lets callers fail fast before indexing when the backend is down,
+	// instead of churning through embed batches that all fail — the core of the
+	// "must not require the backend to always be up" requirement.
+	t.Run("false when the only server is unreachable", func(t *testing.T) {
+		down := newTestOllamaServer(t, false, 200) // GET / -> 503
+		defer down.Close()
+		cfg := testConfigService(t,
+			config.ServerConfig{Backend: "ollama", Host: down.URL, Model: "test", Dims: 3},
+		)
+		fe := NewFailoverEmbedder(cfg)
+		if fe.Healthy() {
+			t.Error("Healthy() = true, want false when no server is reachable")
+		}
+	})
+
+	t.Run("true when a server is reachable", func(t *testing.T) {
+		up := newTestOllamaServer(t, true, 200)
+		defer up.Close()
+		cfg := testConfigService(t,
+			config.ServerConfig{Backend: "ollama", Host: up.URL, Model: "test", Dims: 3},
+		)
+		fe := NewFailoverEmbedder(cfg)
+		if !fe.Healthy() {
+			t.Error("Healthy() = false, want true when a server is reachable")
+		}
+	})
+}
+
 func TestFailover_OnEmbedError(t *testing.T) {
 	srv1 := newTestOllamaServer(t, true, 500)
 	defer srv1.Close()

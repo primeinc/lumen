@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -333,6 +334,101 @@ func resolvePath(dir string) string {
 	return filepath.Clean(dir)
 }
 
+// pathsEqual compares two cleaned paths. On Windows the filesystem is
+// case-insensitive and the OS reports system paths with inconsistent casing
+// (e.g. C:\WINDOWS vs C:\Windows), so the comparison folds case there; on other
+// platforms it is exact.
+func pathsEqual(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// sameDir reports whether a and b refer to the same directory. It prefers
+// os.SameFile when both paths exist on disk — which compares the volume + file
+// index (NTFS file ID on Windows, device+inode on Unix) and so is invariant to
+// case, Windows 8.3 short names (e.g. ADMINI~1), and symlinks.
+//
+// It falls back to a cleaned, case-folded-on-Windows string compare whenever
+// identity is NOT confirmed: either path absent, or os.SameFile false. The
+// latter matters because os.SameFile's Windows path (loadFileId) re-opens each
+// path with CreateFile(OPEN_EXISTING) and returns false if that open fails —
+// so a directory that can be stat'd but not opened (e.g. permissions) would
+// otherwise escape the refusal. os.SameFile requires os.Stat results, so both
+// are stat'd here.
+func sameDir(a, b string) bool {
+	if ai, err := os.Stat(a); err == nil {
+		if bi, err := os.Stat(b); err == nil && os.SameFile(ai, bi) {
+			return true
+		}
+	}
+	return pathsEqual(filepath.Clean(a), filepath.Clean(b))
+}
+
+// matchesRefusedRoot reports whether dir is one of the refusedRoots. The fast
+// path is an exact cleaned/resolved map lookup; otherwise each refused root is
+// compared with sameDir, which handles every case-insensitive match: via
+// os.SameFile when both paths exist on disk (resolving case, 8.3 short names,
+// and symlinks) and via a cleaned + case-folded-on-Windows string compare when
+// a path is absent. A separate EqualFold scan would be dead code here — on a
+// case-insensitive filesystem os.SameFile already matches case variants of an
+// existing root, and sameDir's fallback already case-folds an absent one.
+func matchesRefusedRoot(dir, clean, resolved string) bool {
+	if refusedRoots[clean] || refusedRoots[resolved] {
+		return true
+	}
+	for root := range refusedRoots {
+		if sameDir(dir, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// systemTempDirs returns the cleaned and symlink-resolved temporary directories
+// that must never be an index root: os.TempDir(), the %TEMP%/%TMP% environment
+// values on Windows, and — also on Windows — the SYSTEM account's temp dir
+// %SystemRoot%\Temp (typically C:\WINDOWS\TEMP). The system temp tree is large,
+// machine-managed, and routinely full of unrelated nested git repositories (test
+// fixtures, clones), so indexing it walks the entire tree.
+func systemTempDirs() []string {
+	var dirs []string
+	seen := make(map[string]bool)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		for _, c := range []string{filepath.Clean(p), resolvePath(p)} {
+			if c != "" && !seen[c] {
+				seen[c] = true
+				dirs = append(dirs, c)
+			}
+		}
+	}
+	add(os.TempDir())
+	if runtime.GOOS == "windows" {
+		add(os.Getenv("TEMP"))
+		add(os.Getenv("TMP"))
+		// A service or background process receives a SYSTEM temp dir as its
+		// os.TempDir() — the 2026-06-19 incident's index root. Per the Win32
+		// temp-path resolution (GetTempPath: %TMP% -> %TEMP% -> %USERPROFILE% ->
+		// Windows dir; GetTempPath2 for SYSTEM processes: %SystemRoot%\SystemTemp,
+		// or the SystemTemp env override) the machine-level temp dirs are
+		// %SystemRoot%\Temp (legacy) and %SystemRoot%\SystemTemp. Refuse them
+		// regardless of this process's TEMP/TMP, so they are caught even when
+		// lumen runs as a normal user whose os.TempDir() points elsewhere (e.g.
+		// %LOCALAPPDATA%\Temp) — the case that fails only on a clean host, not on
+		// the incident machine where os.TempDir() already was C:\WINDOWS\TEMP.
+		add(os.Getenv("SystemTemp"))
+		if sysRoot := os.Getenv("SystemRoot"); sysRoot != "" {
+			add(filepath.Join(sysRoot, "Temp"))
+			add(filepath.Join(sysRoot, "SystemTemp"))
+		}
+	}
+	return dirs
+}
+
 // IsRootUnindexable reports whether dir is unsuitable as a Lumen index root.
 // When true, the returned string is a short human-readable reason suitable for
 // inclusion in an error message. When false, the reason is empty.
@@ -357,14 +453,15 @@ func IsRootUnindexable(dir string) (bool, string) {
 	// while the cleaned-input check keeps "/etc" itself matching.
 	clean := filepath.Clean(dir)
 	resolved := resolvePath(dir)
-	if refusedRoots[clean] || refusedRoots[resolved] {
+	if matchesRefusedRoot(dir, clean, resolved) {
 		return true, "hardcoded system root"
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		homeClean := filepath.Clean(home)
-		homeResolved := resolvePath(home)
-		if homeClean == clean || homeClean == resolved || homeResolved == clean || homeResolved == resolved {
-			return true, "user home directory"
+	if home, err := os.UserHomeDir(); err == nil && sameDir(dir, home) {
+		return true, "user home directory"
+	}
+	for _, tmp := range systemTempDirs() {
+		if sameDir(dir, tmp) {
+			return true, "system temporary directory"
 		}
 	}
 

@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -223,7 +224,7 @@ func TestDiscoverNestedGitRepos_FindsNestedRepos(t *testing.T) {
 	run(t, repoA, "git", "init")
 	run(t, repoB, "git", "init")
 
-	repos := DiscoverNestedGitRepos(parent)
+	repos, _ := DiscoverNestedGitRepos(parent)
 	if len(repos) != 2 {
 		t.Fatalf("expected 2 nested repos, got %d: %v", len(repos), repos)
 	}
@@ -255,7 +256,7 @@ func TestDiscoverNestedGitRepos_SkipsWhenRootIsGit(t *testing.T) {
 	}
 	run(t, sub, "git", "init")
 
-	repos := DiscoverNestedGitRepos(parent)
+	repos, _ := DiscoverNestedGitRepos(parent)
 	if len(repos) != 0 {
 		t.Fatalf("expected nil when root is a git repo, got %v", repos)
 	}
@@ -274,7 +275,7 @@ func TestDiscoverNestedGitRepos_DeeplyNested(t *testing.T) {
 	}
 	run(t, deep, "git", "init")
 
-	repos := DiscoverNestedGitRepos(parent)
+	repos, _ := DiscoverNestedGitRepos(parent)
 	if len(repos) != 1 {
 		t.Fatalf("expected 1 nested repo, got %d: %v", len(repos), repos)
 	}
@@ -288,7 +289,7 @@ func TestDiscoverNestedGitRepos_DeeplyNested(t *testing.T) {
 
 func TestDiscoverNestedGitRepos_NoNestedRepos(t *testing.T) {
 	parent := t.TempDir()
-	repos := DiscoverNestedGitRepos(parent)
+	repos, _ := DiscoverNestedGitRepos(parent)
 	if len(repos) != 0 {
 		t.Fatalf("expected nil for directory with no nested repos, got %v", repos)
 	}
@@ -310,7 +311,7 @@ func TestDiscoverNestedGitRepos_DoesNotDescendIntoGitRepo(t *testing.T) {
 	run(t, outer, "git", "init")
 	run(t, inner, "git", "init")
 
-	repos := DiscoverNestedGitRepos(parent)
+	repos, _ := DiscoverNestedGitRepos(parent)
 	if len(repos) != 1 {
 		t.Fatalf("expected 1 repo (outer only), got %d: %v", len(repos), repos)
 	}
@@ -320,6 +321,59 @@ func TestDiscoverNestedGitRepos_DoesNotDescendIntoGitRepo(t *testing.T) {
 	if got != resolved {
 		t.Errorf("expected %q, got %q", resolved, got)
 	}
+}
+
+func TestDiscoverNestedGitRepos_BoundsRunawayWalk(t *testing.T) {
+	// Regression for the runaway-indexing incident: a non-git root holding more
+	// nested repos than the limit must report truncated=true and cap the returned
+	// set, so the caller can refuse the root entirely instead of indexing a
+	// partial subset (and leaking the overflow into the parent index). A .git dir
+	// satisfies IsGitRoot, so fake repos keep this fast and git-free.
+	makeRepos := func(t *testing.T, n int) string {
+		t.Helper()
+		parent := t.TempDir()
+		for i := range n {
+			repo := filepath.Join(parent, "repo"+strconv.Itoa(i))
+			if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return parent
+	}
+
+	t.Run("caps and reports truncation past the default limit", func(t *testing.T) {
+		parent := makeRepos(t, DefaultMaxNestedRepos+25)
+		repos, truncated := DiscoverNestedGitRepos(parent)
+		if !truncated {
+			t.Errorf("truncated = false, want true for %d > %d nested repos", DefaultMaxNestedRepos+25, DefaultMaxNestedRepos)
+		}
+		if len(repos) != DefaultMaxNestedRepos {
+			t.Errorf("returned %d repos, want the cap %d", len(repos), DefaultMaxNestedRepos)
+		}
+	})
+
+	t.Run("not truncated at or below the limit", func(t *testing.T) {
+		parent := makeRepos(t, 5)
+		repos, truncated := DiscoverNestedGitRepos(parent)
+		if truncated {
+			t.Error("truncated = true, want false for 5 nested repos")
+		}
+		if len(repos) != 5 {
+			t.Errorf("returned %d repos, want 5", len(repos))
+		}
+	})
+
+	t.Run("LUMEN_MAX_NESTED_REPOS overrides the limit", func(t *testing.T) {
+		t.Setenv("LUMEN_MAX_NESTED_REPOS", "10")
+		parent := makeRepos(t, 15)
+		repos, truncated := DiscoverNestedGitRepos(parent)
+		if !truncated {
+			t.Error("truncated = false, want true for 15 > 10 (override)")
+		}
+		if len(repos) != 10 {
+			t.Errorf("returned %d repos, want the override cap 10", len(repos))
+		}
+	})
 }
 
 func run(t *testing.T, dir string, name string, args ...string) {
