@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -47,12 +48,17 @@ func Validate(ctx context.Context, cfg *Config) error {
 func buildLumen(ctx context.Context, cfg *Config) error {
 	// Reuse an existing working binary (e.g. the official prebuilt release artifact)
 	// instead of forcing a CGO rebuild. On Windows the CGO/sqlite-vec toolchain often
-	// isn't set up, and the prebuilt binary is identical in function. Copy it to the
-	// path the runner and MCP launcher exec (cfg.LumenBinary) so nothing else changes.
-	binDir := filepath.Dir(cfg.LumenBinary)
+	// isn't set up, and the prebuilt binary is identical in function. Copy/build to a
+	// path that carries the .exe extension on Windows: Go's exec won't run a bare
+	// extensionless file, but resolves `bin/lumen` -> `bin/lumen.exe`, so the runner
+	// and MCP launcher (which exec cfg.LumenBinary unchanged) still work.
+	targetBinary := cfg.LumenBinary
+	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(targetBinary), ".exe") {
+		targetBinary += ".exe"
+	}
+	binDir := filepath.Dir(targetBinary)
 	for _, name := range []string{
-		filepath.Base(cfg.LumenBinary),
-		filepath.Base(cfg.LumenBinary) + ".exe",
+		filepath.Base(targetBinary),
 		"lumen-windows-amd64.exe",
 		"lumen.exe",
 	} {
@@ -60,8 +66,8 @@ func buildLumen(ctx context.Context, cfg *Config) error {
 		if !lumenRuns(ctx, cand) {
 			continue
 		}
-		if cand != cfg.LumenBinary {
-			if err := copyExecutable(cand, cfg.LumenBinary); err != nil {
+		if cand != targetBinary {
+			if err := copyExecutable(cand, targetBinary); err != nil {
 				return fmt.Errorf("reusing prebuilt %s: %w", cand, err)
 			}
 		}
@@ -70,7 +76,7 @@ func buildLumen(ctx context.Context, cfg *Config) error {
 	}
 
 	fmt.Print("  Building lumen... ")
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", cfg.LumenBinary, ".")
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", targetBinary, ".")
 	cmd.Dir = cfg.RepoRoot
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
