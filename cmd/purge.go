@@ -182,13 +182,27 @@ func purgeOneTarget(stderr io.Writer, indexMap map[string][]string, seen map[str
 
 // longestAncestor returns the longest key in indexMap that is either equal to
 // target or an ancestor directory of target, or "" if no such key exists.
+//
+// The ancestor test uses filepath.Rel rather than a byte-exact
+// strings.HasPrefix: on Windows filepath.Rel folds case (via sameWord /
+// EqualFold), so an index stored under one casing of a directory still matches a
+// target reached via a different casing — the common case where the index was
+// written from a user-typed path and purge canonicalizes via EvalSymlinks. The
+// stdlib deprecates filepath.HasPrefix for exactly this "does not ignore case
+// when required" hazard. A "." result means stored == target; any other result
+// that does not climb out with ".." means target is at or under stored.
 func longestAncestor(indexMap map[string][]string, target string) string {
 	best := ""
 	for stored := range indexMap {
-		if stored == target || strings.HasPrefix(target, stored+string(filepath.Separator)) {
-			if len(stored) > len(best) {
-				best = stored
-			}
+		rel, err := filepath.Rel(stored, target)
+		if err != nil {
+			continue // different volumes, or not relatable
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue // target is above stored, not under it
+		}
+		if len(stored) > len(best) {
+			best = stored
 		}
 	}
 	return best
