@@ -274,6 +274,29 @@ func TestIsRootUnindexable(t *testing.T) {
 	})
 }
 
+// TestIsRootUnindexable_RefusesCanonicalWindowsTempIndependentOfEnv proves the
+// canonical Windows machine-temp roots are refused by directory identity even
+// when no temp-related environment points at them — the gap where a normal-user
+// os.TempDir() is %LOCALAPPDATA%\Temp and %SystemRoot% is unset. systemTempDirs
+// adds these as env-independent literals, matched by the case-folded string
+// fallback on any OS, so this assertion executes on Linux/macOS CI as well.
+func TestIsRootUnindexable_RefusesCanonicalWindowsTempIndependentOfEnv(t *testing.T) {
+	t.Setenv("TEMP", "")
+	t.Setenv("TMP", "")
+	t.Setenv("SystemRoot", "")
+	t.Setenv("SystemTemp", "")
+
+	for _, p := range []string{`C:\Windows\Temp`, `C:\Windows\SystemTemp`} {
+		got, reason := IsRootUnindexable(p)
+		if !got {
+			t.Errorf("IsRootUnindexable(%q) = false, want true (env-independent refusal)", p)
+		}
+		if reason != "system temporary directory" {
+			t.Errorf("reason for %q = %q, want %q", p, reason, "system temporary directory")
+		}
+	}
+}
+
 // TestMatchesRefusedRoot_CaseInsensitiveOnWindows verifies that a refused root
 // supplied in non-canonical casing still matches. On a real Windows disk this is
 // resolved by os.SameFile inside sameDir: C:\PROGRAMDATA and the refusedRoots
