@@ -15,13 +15,16 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ory/lumen/internal/config"
 	"github.com/ory/lumen/internal/index"
+	"github.com/spf13/cobra"
 )
 
 func TestRunIndex_RefusesUnindexableRoot(t *testing.T) {
@@ -67,3 +70,97 @@ func TestRunIndex_RefusesOversizedNestedRoot(t *testing.T) {
 		t.Fatalf("expected err to wrap index.ErrTooManyNestedRepos, got %q", err.Error())
 	}
 }
+
+func TestIndexingWorkPending(t *testing.T) {
+	// runIndex must not require a live embedding backend for an already-fresh
+	// index (a no-op that embeds nothing); it must still require one when there is
+	// real work. These cover the three signals indexingWorkPending reports on.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	cfg, err := config.NewConfigService("")
+	if err != nil {
+		t.Fatalf("NewConfigService: %v", err)
+	}
+	emb := newEmbedder(cfg)
+	model := emb.ModelName()
+	dims := emb.Dimensions()
+
+	noForce := func() *cobra.Command {
+		c := &cobra.Command{}
+		c.Flags().Bool("force", false, "")
+		return c
+	}
+
+	t.Run("force always reports work pending", func(t *testing.T) {
+		c := &cobra.Command{}
+		c.Flags().Bool("force", true, "")
+		got, werr := indexingWorkPending(c, cfg, emb, t.TempDir(), nil, nil)
+		if werr != nil {
+			t.Fatalf("indexingWorkPending: %v", werr)
+		}
+		if !got {
+			t.Error("force=true: pending = false, want true")
+		}
+	})
+
+	t.Run("never-indexed target reports work pending", func(t *testing.T) {
+		got, werr := indexingWorkPending(noForce(), cfg, emb, t.TempDir(), nil, nil)
+		if werr != nil {
+			t.Fatalf("indexingWorkPending: %v", werr)
+		}
+		if !got {
+			t.Error("never-indexed: pending = false, want true")
+		}
+	})
+
+	t.Run("already-fresh target reports no work pending", func(t *testing.T) {
+		target := t.TempDir()
+		if werr := os.WriteFile(filepath.Join(target, "a.go"), []byte("package a\n\nfunc Foo() {}\n"), 0o644); werr != nil {
+			t.Fatal(werr)
+		}
+		// Build a real fresh index at the path indexingWorkPending will look up,
+		// using a mock embedder so no backend is needed; IsFresh then matches.
+		dbPath := config.DBPathForProject(target, model)
+		if werr := os.MkdirAll(filepath.Dir(dbPath), 0o755); werr != nil {
+			t.Fatal(werr)
+		}
+		idx, werr := index.NewIndexer(dbPath, &fakeEmbedder{dims: dims, model: model}, 0)
+		if werr != nil {
+			t.Fatalf("NewIndexer: %v", werr)
+		}
+		if _, werr := idx.Index(context.Background(), target, true, func(int, int, string) {}); werr != nil {
+			t.Fatalf("Index: %v", werr)
+		}
+		_ = idx.Close()
+
+		got, werr := indexingWorkPending(noForce(), cfg, emb, target, nil, nil)
+		if werr != nil {
+			t.Fatalf("indexingWorkPending: %v", werr)
+		}
+		if got {
+			t.Error("already-fresh: pending = true, want false")
+		}
+	})
+}
+
+// fakeEmbedder is a no-network Embedder used to build a fresh index in tests.
+type fakeEmbedder struct {
+	dims  int
+	model string
+}
+
+func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range out {
+		v := make([]float32, f.dims)
+		if f.dims > 0 {
+			v[0] = 1
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+func (f *fakeEmbedder) Dimensions() int   { return f.dims }
+func (f *fakeEmbedder) ModelName() string { return f.model }
