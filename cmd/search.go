@@ -209,7 +209,12 @@ func finishSearch(
 	var pathPrefix string
 	if searchPath != indexRoot {
 		if rel, relErr := filepath.Rel(indexRoot, searchPath); relErr == nil && rel != "." {
-			pathPrefix = rel
+			// Normalize to forward slashes: stored file_path keys are slash-form
+			// on every platform (see merkle.collectFilePaths), and store.Search
+			// anchors the prefix filter on "/". On Windows filepath.Rel yields a
+			// backslash prefix, which would otherwise never match and silently
+			// return zero results for any scoped/subdirectory search.
+			pathPrefix = filepath.ToSlash(rel)
 		}
 	}
 

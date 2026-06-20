@@ -1005,10 +1005,6 @@ func Nested() {}
 }
 
 func TestIndexer_SkipsPermissionDeniedFile(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root bypasses file permission checks")
-	}
-
 	dir := t.TempDir()
 	writeGoFile(t, dir, "ok.go", `package p
 
@@ -1018,10 +1014,11 @@ func OK() {}
 
 func Secret() {}
 `)
-	if err := os.Chmod(filepath.Join(dir, "secret.go"), 0o000); err != nil {
-		t.Fatal(err)
+	// Make secret.go unreadable for the duration of the index: chmod(0) on Unix,
+	// an exclusive no-share handle on Windows (chmod does not deny reads there).
+	if !makeFileUnreadable(t, filepath.Join(dir, "secret.go")) {
+		t.Skip("cannot make a file unreadable in this environment (e.g. running as root)")
 	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "secret.go"), 0o644) })
 
 	emb := &mockEmbedder{dims: 4, model: "test-model"}
 	idx, err := NewIndexer(":memory:", emb, 0)

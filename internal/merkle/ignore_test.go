@@ -717,8 +717,12 @@ func TestAncestorDirs(t *testing.T) {
 				t.Fatalf("ancestorDirs(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("ancestorDirs(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+				// ancestorDirs returns OS-native keys (filepath.Join), used
+				// internally with filepath.Join/Rel; on Windows "a/b" becomes
+				// "a\\b". Compare against the host-localized expectation.
+				want := filepath.FromSlash(tt.want[i])
+				if got[i] != want {
+					t.Errorf("ancestorDirs(%q)[%d] = %q, want %q", tt.input, i, got[i], want)
 				}
 			}
 		})
@@ -808,9 +812,12 @@ func TestIgnoreTree_GlobalGitignore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create git config pointing to it
+	// Create git config pointing to it. Use forward slashes for the path:
+	// git treats backslashes in config values as escape sequences, so a raw
+	// Windows path (C:\Users\...) would be mangled. git accepts forward-slash
+	// paths on every platform.
 	configPath := filepath.Join(globalIgnoreDir, "gitconfig")
-	configContent := fmt.Sprintf("[core]\n\texcludesFile = %s\n", globalIgnorePath)
+	configContent := fmt.Sprintf("[core]\n\texcludesFile = %s\n", filepath.ToSlash(globalIgnorePath))
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}

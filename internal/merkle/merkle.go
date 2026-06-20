@@ -44,7 +44,6 @@ func DefaultSkip(relPath string, isDir bool) bool {
 	return !strings.HasSuffix(base, ".go")
 }
 
-
 const merkleWorkers = 8
 
 const maxFileSize = 10 * 1024 * 1024 // 10 MB
@@ -100,7 +99,16 @@ func collectFilePaths(rootDir string, skip SkipFunc) ([]string, error) {
 			return nil
 		}
 		if !skip(rel, false) {
-			relPaths = append(relPaths, rel)
+			// Store the key in slash-normalized form so tree.Files keys, the
+			// root hash, the stored file_path, chunk IDs, and embedding inputs
+			// are byte-identical across platforms — on Windows filepath.Rel
+			// yields backslash separators. skip() is still given the OS-native
+			// rel above so filepath.Base/Dir and the ignore matchers behave as
+			// the host expects; only the persisted identifier is normalized.
+			// Disk reads re-localize the slash form via filepath.Join, whose
+			// Clean converts '/' back to the OS separator. ToSlash is a no-op on
+			// Unix, so Unix indexes (and their root hashes) are unchanged.
+			relPaths = append(relPaths, filepath.ToSlash(rel))
 		}
 		return nil
 	})
@@ -133,7 +141,11 @@ func hashFilesInParallel(rootDir string, relPaths []string) (*Tree, error) {
 			for rel := range work {
 				data, err := os.ReadFile(filepath.Join(rootDir, rel))
 				if err != nil {
-					if os.IsPermission(err) {
+					// A single file that cannot be read right now — permission
+					// denied, or on Windows held open by another process without
+					// read sharing — is skipped, not fatal. The next index pass
+					// retries it once the condition clears.
+					if IsInaccessibleErr(err) {
 						continue
 					}
 					results <- result{err: err}

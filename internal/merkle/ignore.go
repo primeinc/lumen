@@ -109,7 +109,11 @@ type IgnoreTree struct {
 func NewIgnoreTree(rootDir string, exts []string) *IgnoreTree {
 	extSet := make(map[string]bool, len(exts))
 	for _, ext := range exts {
-		extSet[ext] = true
+		// Fold case so the extension filter matches files the OS treats as the
+		// same name. On case-insensitive filesystems (Windows, macOS) App.PY and
+		// app.py are one file; without folding, an uppercase-extension source
+		// file is silently never collected into the tree.
+		extSet[strings.ToLower(ext)] = true
 	}
 	t := &IgnoreTree{
 		rootDir: rootDir,
@@ -156,7 +160,7 @@ func (t *IgnoreTree) shouldSkip(relPath string, isDir bool) bool {
 	if isDir && SkipDirs[base] {
 		return true
 	}
-	if isDir && t.extraSkipDirs[relPath] {
+	if isDir && t.extraSkipDirs[filepath.ToSlash(relPath)] {
 		return true
 	}
 	if !isDir && SkipFiles[base] {
@@ -178,12 +182,15 @@ func (t *IgnoreTree) shouldSkip(relPath string, isDir bool) bool {
 		}
 	}
 
-	return !isDir && !t.extSet[filepath.Ext(relPath)]
+	return !isDir && !t.extSet[strings.ToLower(filepath.Ext(relPath))]
 }
 
 func (t *IgnoreTree) checkIgnoreRules(relPath, anc string, isDir bool) bool {
 	d := t.loadDir(anc)
-	pathFromAnc := getPathFromAncestor(relPath, anc)
+	// Normalize to forward slashes so the path handed to the gitignore matchers
+	// is uniformly slash-separated rather than the mixed "a\b/" form that
+	// appending "/" to a backslash filepath.Rel result would produce on Windows.
+	pathFromAnc := filepath.ToSlash(getPathFromAncestor(relPath, anc))
 	matchPath := pathFromAnc
 	if isDir {
 		matchPath = pathFromAnc + "/"
@@ -551,7 +558,12 @@ func MakeSkipWithExtra(rootDir string, exts []string, extraSkipDirs []string) Sk
 	if len(extraSkipDirs) > 0 {
 		tree.extraSkipDirs = make(map[string]bool, len(extraSkipDirs))
 		for _, p := range extraSkipDirs {
-			tree.extraSkipDirs[filepath.Clean(p)] = true
+			// Key on the slash-normalized form so the lookup in shouldSkip is
+			// separator-agnostic. The walk's relPath is backslash on Windows
+			// (filepath.Rel) while these entries come from filepath.Rel/Clean of
+			// caller paths; normalizing both sides keeps nested-repo and internal
+			// worktree exclusion working after merkle keys are slash-normalized.
+			tree.extraSkipDirs[filepath.ToSlash(filepath.Clean(p))] = true
 		}
 	}
 	return tree.shouldSkip

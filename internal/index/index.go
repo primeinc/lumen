@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +41,10 @@ import (
 var supportedExts = func() map[string]bool {
 	m := make(map[string]bool, len(chunker.SupportedExtensions()))
 	for _, ext := range chunker.SupportedExtensions() {
-		m[ext] = true
+		// Keys are folded to lower case so the stale-record purge matches the
+		// case-insensitive filesystem semantics of Windows and macOS; see the
+		// strings.ToLower lookups below.
+		m[strings.ToLower(ext)] = true
 	}
 	return m
 }()
@@ -334,7 +338,7 @@ func (idx *Indexer) indexWithTree(ctx context.Context, projectDir, oldRootHash s
 	// Purge stale records with unsupported extensions — applies in both
 	// force and incremental paths to clean up donor-seeded .md etc. records.
 	for path := range oldHashes {
-		if !supportedExts[filepath.Ext(path)] {
+		if !supportedExts[strings.ToLower(filepath.Ext(path))] {
 			if err := idx.store.DeleteFileChunks(path); err != nil {
 				return stats, fmt.Errorf("purge stale file %s: %w", path, err)
 			}
@@ -459,7 +463,11 @@ func (idx *Indexer) indexWithTree(ctx context.Context, projectDir, oldRootHash s
 		absPath := filepath.Join(projectDir, relPath)
 		content, err := os.ReadFile(absPath)
 		if err != nil {
-			if os.IsPermission(err) {
+			// A file that cannot be read right now — permission denied, or on
+			// Windows held open by another process without read sharing — is
+			// skipped for this pass rather than failing the whole index. The
+			// next run retries it once the condition clears.
+			if merkle.IsInaccessibleErr(err) {
 				if idx.logger != nil {
 					idx.logger.Warn("skipping inaccessible file", "path", relPath, "error", err)
 				}
