@@ -49,10 +49,10 @@ jobs:
         run: go vet -tags=fts5 ./...
 
   test-windows:
-    name: Test (windows path identity)
+    name: Test (windows, full suite)
     runs-on: windows-latest
     if: github.actor != 'release-please[bot]'
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -61,24 +61,33 @@ jobs:
           go-version: '1.26'
           cache: true
 
-      # The main `test` job is Linux-only, so the assertions guarded by
-      # `runtime.GOOS == "windows"` — case-insensitive root matching, 8.3 short
-      # names, os.SameFile identity, the C:\Windows\Temp refusal — never execute
-      # in CI. Run those on a real Windows runner. The merkle run is SCOPED to the
-      # path-identity tests on purpose: several unrelated merkle tests carry Unix
-      # path-separator / chmod assumptions that pre-date this gate and would fail
-      # on Windows (e.g. forward-slash relPaths, chmod-based permission checks);
-      # widening the gate to the full package is follow-up work best verified on a
-      # Windows runner. git and embedder pass in full. CGO is disabled (no
-      # sqlite-vec/tree-sitter needed), so no C toolchain is required. shell: bash
-      # is set so a failing first command fails the step (Windows pwsh would not).
-      - name: Go test (Windows path-identity behavior)
+      # Windows is a first-class, release-governed target (see README "Platform
+      # support" and the windows/amd64 build in .goreleaser.yml), so it runs the
+      # SAME full `go test ./...` as Linux — no -run narrowing, no excluded
+      # packages. This replaces an earlier scoped path-identity gate that hid
+      # Windows-only defects (separator-keyed indexes, scoped-search prefix
+      # mismatch, the console-spawn flag, case-insensitive DB-path identity)
+      # behind a green check because cmd/index/store never ran on Windows.
+      #
+      # The sqlite-vec cgo binding does `#include "sqlite3.h"`, which the
+      # GitHub Windows image does not provide. Rather than fetch the amalgamation
+      # over the network, reuse the header the pinned mattn/go-sqlite3 dependency
+      # already vendors (sqlite3-binding.h) so the build is hermetic and matches
+      # go.mod. The windows-latest image ships a working Mingw-w64 gcc on PATH.
+      # shell: bash makes a failing command fail the step (pwsh would not).
+      - name: Test (full suite, cgo)
         shell: bash
         run: |
-          go test -run 'IsRootUnindexable|MatchesRefusedRoot|SameDir' ./internal/merkle/...
-          go test ./internal/git/... ./internal/embedder/...
-        env:
-          CGO_ENABLED: '0'
+          go mod download
+          SRC="$(cygpath -u "$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)")"
+          INC="$(cygpath -m "$PWD")/cgoinc"
+          mkdir -p "$INC"
+          cp "$SRC/sqlite3-binding.h" "$INC/sqlite3.h"
+          gcc --version
+          CGO_ENABLED=1 CC=gcc CGO_CFLAGS="-I$INC" \
+            go test -tags=fts5 -p 1 -timeout=30m ./...
+          # Vet the windows-tagged code paths the Linux vet job never compiles.
+          CGO_ENABLED=1 CC=gcc CGO_CFLAGS="-I$INC" go vet -tags=fts5 ./...
 
   lint:
     name: Lint
