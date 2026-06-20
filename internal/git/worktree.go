@@ -165,6 +165,13 @@ func DiscoverNestedGitRepos(rootPath string) (repos []string, truncated bool) {
 	limit := maxNestedReposLimit()
 	_ = filepath.WalkDir(rootPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			// Skip an unreadable subtree and keep counting elsewhere. This can
+			// undercount nested repos hidden beneath an unreadable dir (so an
+			// oversized root might not be refused as oversized), but the blast is
+			// bounded: an error on rootPath itself makes the subsequent
+			// merkle.BuildTree fail too, turning the index into a clean error
+			// rather than a runaway, and canonical temp/$HOME roots are refused by
+			// IsRootUnindexable regardless of this count.
 			return filepath.SkipDir
 		}
 		if !d.IsDir() {
