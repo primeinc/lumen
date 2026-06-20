@@ -69,11 +69,15 @@ func (f *FailoverEmbedder) ActiveServerIndex() int {
 	return f.active
 }
 
-// Healthy probes the configured embedding servers (lazily, the same way Embed
-// does) and reports whether at least one is currently reachable. Callers use it
-// to fail fast before starting indexing when the backend is down, instead of
-// churning through embed batches that all fail. Lumen must remain usable when
-// the backend (e.g. Ollama) is not running; this is the gate that makes that so.
+// Healthy reports whether at least one configured embedding server is reachable.
+// On first use (or after a server-list change) it probes the servers the same
+// way Embed does; within the reprobe cooldown (reprobeInterval) after a probe
+// that found none, it returns the cached result rather than re-probing. Callers
+// use it to fail fast before indexing when the backend is down instead of
+// churning through embed batches that all fail. Lumen must remain usable when the
+// backend (e.g. Ollama) is not running; this is the gate that makes that so. The
+// CLI constructs a fresh embedder per `lumen index`, so its first call always
+// probes live.
 func (f *FailoverEmbedder) Healthy() bool {
 	return f.ensureReady(true) >= 0
 }
