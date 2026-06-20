@@ -445,6 +445,17 @@ func systemTempDirs() []string {
 			add(filepath.Join(sysRoot, "SystemTemp"))
 		}
 	}
+	// Env-independent backstop: refuse the canonical Windows machine-temp roots by
+	// directory identity even when %SystemRoot%/%TEMP%/%TMP% are unset or point
+	// elsewhere (e.g. a normal user whose os.TempDir() is %LOCALAPPDATA%\Temp). The
+	// %SystemRoot%-derived entries above handle a non-default SystemDrive (Windows
+	// not on C:); these literals cover the canonical C:\Windows install regardless
+	// of environment. IsRootUnindexable matches them via os.SameFile on Windows
+	// (invariant to case and 8.3 short names) and via the case-folded string
+	// fallback otherwise; on non-Windows hosts they are inert literals that match
+	// no real directory.
+	add(`C:\Windows\Temp`)
+	add(`C:\Windows\SystemTemp`)
 	return dirs
 }
 
