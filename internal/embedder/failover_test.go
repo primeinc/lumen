@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -131,6 +132,59 @@ func TestFailover_Healthy(t *testing.T) {
 			t.Error("Healthy() = false, want true when a server is reachable")
 		}
 	})
+}
+
+func TestFailover_ConcurrentReadyProbesOnce(t *testing.T) {
+	// Healthy()/Embed()/Dimensions()/ModelName() probe lazily. The probe must run
+	// once under concurrent first use (serialized by probeMu) and must not be held
+	// under f.mu across the network call — otherwise concurrent callers serialize
+	// on the per-server health check. With a healthy server, a burst of concurrent
+	// callers must observe exactly one GET / probe and must not deadlock.
+	var probes int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/":
+			atomic.AddInt32(&probes, 1)
+			_, _ = fmt.Fprint(w, "Ollama is running")
+		case r.Method == "POST" && r.URL.Path == "/api/embed":
+			_, _ = fmt.Fprint(w, `{"embeddings":[[0.1,0.2,0.3]]}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := testConfigService(t,
+		config.ServerConfig{Backend: "ollama", Host: srv.URL, Model: "test", Dims: 3},
+	)
+	fe := NewFailoverEmbedder(cfg)
+
+	const n = 24
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			switch i % 4 {
+			case 0:
+				fe.Healthy()
+			case 1:
+				fe.Dimensions()
+			case 2:
+				fe.ModelName()
+			default:
+				_, _ = fe.Embed(context.Background(), []string{"x"})
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&probes); got != 1 {
+		t.Errorf("health probes = %d, want exactly 1 (a single serialized init probe)", got)
+	}
+	if fe.ActiveServerIndex() != 0 {
+		t.Errorf("active = %d, want 0", fe.ActiveServerIndex())
+	}
 }
 
 func TestFailover_OnEmbedError(t *testing.T) {
