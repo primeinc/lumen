@@ -103,15 +103,23 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		return index.TooManyNestedReposError(projectPath, len(nestedRepos))
 	}
 
-	// Fail fast when no embedding backend is reachable. Indexing with a dead
-	// backend embeds nothing — every batch fails — and (before the root and
-	// nested-walk guards) produced the 2026-06-19 runaway storm. Checked after
-	// the cheap local refusals so an oversized root or system path is reported
-	// precisely instead of being masked by a "backend down" error; this keeps
-	// Lumen usable when the backend (e.g. Ollama) is down rather than requiring
-	// it to always be running.
+	// Fail fast when no embedding backend is reachable AND there is indexing work
+	// to do. Indexing with a dead backend embeds nothing — every batch fails — and
+	// (before the root and nested-walk guards) produced the 2026-06-19 runaway
+	// storm. But an already-fresh index is a no-op that embeds nothing
+	// (EnsureFresh's root-hash fast path), so `lumen index` of an up-to-date repo
+	// must still succeed when the backend is down. The freshness probe runs only
+	// on the unhealthy path, so a healthy backend pays nothing; the check stays
+	// after the cheap local refusals so an oversized root or system path is still
+	// reported precisely instead of being masked by a "backend down" error.
 	if !emb.Healthy() {
-		return fmt.Errorf("refusing to index %s: no healthy embedding server (is the backend running?)", projectPath)
+		pending, werr := indexingWorkPending(cmd, cfg, emb, projectPath, nestedRepos, logger)
+		if werr != nil {
+			return werr
+		}
+		if pending {
+			return fmt.Errorf("refusing to index %s: no healthy embedding server (is the backend running?)", projectPath)
+		}
 	}
 
 	for _, repo := range nestedRepos {
@@ -310,4 +318,41 @@ func performIndexing(ctx context.Context, cmd *cobra.Command, idx *index.Indexer
 	}
 
 	return stats, nil
+}
+
+// indexingWorkPending reports whether indexing projectPath (and any nested
+// repos) would actually embed anything: true when --force is set, when a target
+// has no index database yet, or when a target's stored root hash no longer
+// matches its current tree. A target that is already fresh embeds nothing, so a
+// down embedding backend is harmless for it. runIndex uses this to let
+// `lumen index` of an up-to-date project succeed while the backend is offline,
+// without weakening the fail-fast for targets that do need (re)indexing. The
+// freshness checks build merkle trees but never embed.
+func indexingWorkPending(cmd *cobra.Command, cfg *config.ConfigService, emb *embedder.FailoverEmbedder, projectPath string, nestedRepos []string, logger *slog.Logger) (bool, error) {
+	if force, _ := cmd.Flags().GetBool("force"); force {
+		return true, nil
+	}
+	model := emb.ModelName()
+	targets := make([]string, 0, len(nestedRepos)+1)
+	targets = append(targets, nestedRepos...)
+	targets = append(targets, projectPath)
+	for _, target := range targets {
+		dbPath := config.DBPathForProject(target, model)
+		if _, statErr := os.Stat(dbPath); statErr != nil {
+			return true, nil // no index database yet → never indexed → work pending
+		}
+		idx, err := setupIndexer(cfg, emb, dbPath, logger)
+		if err != nil {
+			return false, err
+		}
+		fresh, freshErr := idx.IsFresh(target)
+		_ = idx.Close()
+		if freshErr != nil {
+			return false, freshErr
+		}
+		if !fresh {
+			return true, nil
+		}
+	}
+	return false, nil
 }
