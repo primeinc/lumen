@@ -46,6 +46,11 @@ func TestRunIndex_RefusesOversizedNestedRoot(t *testing.T) {
 	// repo — so the 2026-06-19 runaway-indexing incident cannot recur from the
 	// CLI. A .git dir satisfies IsGitRoot, so fake repos keep this fast and
 	// backend-free; the low cap keeps the fixture small.
+	//
+	// Isolate XDG_CONFIG_HOME so the test never reads a developer's real
+	// ~/.config/lumen/config.yaml: loadConfigWithFlags runs before the
+	// nested-repo refusal, so without this the test is non-hermetic.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("LUMEN_MAX_NESTED_REPOS", "2")
 	dir := t.TempDir()
 	for _, name := range []string{"a", "b", "c", "d", "e"} {
