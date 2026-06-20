@@ -346,6 +346,29 @@ func TestSameDir(t *testing.T) {
 	}
 }
 
+// TestSameDirWithInfo_MatchesViaResolvedFormWhenIdentityUnconfirmed guards the
+// $HOME / system-temp refusal against the degraded path: when os.SameFile cannot
+// confirm identity (aErr != nil — the Windows loadFileId failure for an
+// un-openable directory), the string fallback must still match a path that
+// equals the target only after symlink resolution, using the input's RESOLVED
+// form. A clean-vs-clean compare alone would miss it and let the guard escape.
+func TestSameDirWithInfo_MatchesViaResolvedFormWhenIdentityUnconfirmed(t *testing.T) {
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+	cleanA := filepath.Clean(link)
+	resolvedA := resolvePath(link) // resolves through the symlink to target
+	if pathsEqual(cleanA, filepath.Clean(target)) {
+		t.Fatal("precondition: the symlink path should differ from its target")
+	}
+	// aErr != nil forces the string fallback (os.SameFile branch skipped).
+	if !sameDirWithInfo(nil, os.ErrPermission, cleanA, resolvedA, target) {
+		t.Error("sameDirWithInfo did not match via the resolved form; the $HOME/temp guard is narrowed")
+	}
+}
+
 func TestMakeSkip_HardcodedFiles(t *testing.T) {
 	dir := t.TempDir()
 	skip := MakeSkip(dir, []string{".go", ".json", ".yaml"})

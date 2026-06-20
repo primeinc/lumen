@@ -359,21 +359,26 @@ func pathsEqual(a, b string) bool {
 // are stat'd here.
 func sameDir(a, b string) bool {
 	ai, err := os.Stat(a)
-	return sameDirWithInfo(ai, err, filepath.Clean(a), b)
+	return sameDirWithInfo(ai, err, filepath.Clean(a), resolvePath(a), b)
 }
 
-// sameDirWithInfo is sameDir with a's os.Stat result supplied by the caller, so a
-// single stat of a can be reused across many candidate b values (e.g. the whole
-// refusedRoots set) instead of re-statting a on every comparison. aInfo / aErr
-// are os.Stat(a)'s results and cleanA is filepath.Clean(a); the os.SameFile
-// branch is taken only when aErr is nil and b also stats.
-func sameDirWithInfo(aInfo os.FileInfo, aErr error, cleanA, b string) bool {
+// sameDirWithInfo is sameDir with a's os.Stat result and both its cleaned and
+// symlink-resolved forms supplied by the caller, so a single stat + resolve of a
+// can be reused across many candidate b values (e.g. the whole refusedRoots set)
+// instead of recomputing them per comparison. aInfo / aErr are os.Stat(a)'s
+// results; cleanA is filepath.Clean(a) and resolvedA is resolvePath(a). The
+// os.SameFile branch is taken only when aErr is nil and b also stats; otherwise
+// BOTH of a's forms are compared against b's cleaned form, so a path that equals
+// b only after symlink resolution is still caught when os.SameFile cannot confirm
+// identity (the degraded Windows loadFileId path, or an un-openable directory).
+func sameDirWithInfo(aInfo os.FileInfo, aErr error, cleanA, resolvedA, b string) bool {
 	if aErr == nil {
 		if bi, err := os.Stat(b); err == nil && os.SameFile(aInfo, bi) {
 			return true
 		}
 	}
-	return pathsEqual(cleanA, filepath.Clean(b))
+	cleanB := filepath.Clean(b)
+	return pathsEqual(cleanA, cleanB) || pathsEqual(resolvedA, cleanB)
 }
 
 // matchesRefusedRoot reports whether dir is one of the refusedRoots. The fast
@@ -398,7 +403,7 @@ func matchesRefusedRootWithInfo(dirInfo os.FileInfo, dirErr error, clean, resolv
 		return true
 	}
 	for root := range refusedRoots {
-		if sameDirWithInfo(dirInfo, dirErr, clean, root) {
+		if sameDirWithInfo(dirInfo, dirErr, clean, resolved, root) {
 			return true
 		}
 	}
@@ -463,14 +468,22 @@ func systemTempDirs() []string {
 // When true, the returned string is a short human-readable reason suitable for
 // inclusion in an error message. When false, the reason is empty.
 //
-// Two checks combine:
+// Four checks combine, in order:
 //
-//  1. Hardcoded refusal list — filesystem roots ($HOME, /, /Users, /tmp,
-//     /var, /etc, /usr, /Applications, /Library and macOS /private/* twins)
-//     that should never be project roots regardless of user config.
-//  2. .lumenignore probe — if dir/.lumenignore contains patterns broad
-//     enough to match every file (e.g. "**", "**/*", "*"), the user has
-//     declared the directory un-indexable at its boundary.
+//  1. Hardcoded refusal list — filesystem roots (/, /Users, /tmp, /var, /etc,
+//     /usr, /Applications, /Library, the macOS /private/* twins, and the
+//     Windows C:\, C:\Windows, … entries) that should never be project roots.
+//  2. $HOME — the user's home directory, resolved separately so a symlink to it
+//     is also refused.
+//  3. System temporary directory — os.TempDir(), %TEMP%/%TMP%, the Windows
+//     SYSTEM temp dirs, and the env-independent C:\Windows\Temp / \SystemTemp
+//     literals (the 2026-06-19 runaway-indexing guard).
+//  4. .lumenignore catch-all probe — if dir/.lumenignore contains patterns broad
+//     enough to match every file (e.g. "**", "**/*", "*"), the user has declared
+//     the directory un-indexable at its boundary.
+//
+// Checks 1–3 match by directory identity (os.SameFile, with a case-folded /
+// resolved string fallback), so a project nested under any of them is unaffected.
 //
 // Without these guards the indexer walks the entire tree, ignores every
 // file, produces an empty index, and on macOS triggers TCC prompts along
@@ -490,15 +503,29 @@ func IsRootUnindexable(dir string) (bool, string) {
 	if matchesRefusedRootWithInfo(dirInfo, dirErr, clean, resolved) {
 		return true, "hardcoded system root"
 	}
-	if home, err := os.UserHomeDir(); err == nil && sameDirWithInfo(dirInfo, dirErr, clean, home) {
-		return true, "user home directory"
+	// Compare dir's cleaned and resolved forms against both home and home's
+	// resolved form (4-way), so a symlink to $HOME is refused even on the degraded
+	// path where os.SameFile cannot confirm identity.
+	if home, err := os.UserHomeDir(); err == nil {
+		if sameDirWithInfo(dirInfo, dirErr, clean, resolved, home) ||
+			sameDirWithInfo(dirInfo, dirErr, clean, resolved, resolvePath(home)) {
+			return true, "user home directory"
+		}
 	}
+	// systemTempDirs already yields both the cleaned and resolved form of each
+	// temp dir, so threading dir's resolved form here completes the 4-way match.
 	for _, tmp := range systemTempDirs() {
-		if sameDirWithInfo(dirInfo, dirErr, clean, tmp) {
+		if sameDirWithInfo(dirInfo, dirErr, clean, resolved, tmp) {
 			return true, "system temporary directory"
 		}
 	}
 
+	// A missing .lumenignore (the common case) and a present-but-unreadable one
+	// both yield "no catch-all declared" (indexable): go-gitignore's
+	// CompileIgnoreFile errors only on I/O / not-exist (any byte content compiles
+	// as patterns), and refusing a whole project because one optional ignore file
+	// is unreadable would be worse than proceeding — the per-directory walk
+	// re-reads it and honors whatever it can.
 	gi, err := ignore.CompileIgnoreFile(filepath.Join(dir, ".lumenignore"))
 	if err != nil || gi == nil {
 		return false, ""
