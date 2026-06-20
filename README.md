@@ -284,11 +284,26 @@ All configuration is via environment variables:
 | `OLLAMA_HOST`            | `http://localhost:11434` | Ollama server URL                                             |
 | `LM_STUDIO_HOST`         | `http://localhost:1234`  | LM Studio server URL                                          |
 | `LUMEN_MAX_CHUNK_TOKENS` | `512`                    | Max tokens per chunk before splitting                         |
+| `LUMEN_MAX_NESTED_REPOS` | `64`                     | Nested-repo ceiling for a non-git root before refusal (note ²) |
 | `LUMEN_EMBED_DIMS`       | —                        | Override embedding dimensions (required for unlisted models)  |
 | `LUMEN_EMBED_CTX`        | `8192` (unlisted models) | Override context window length                                |
 
 ¹ `ordis/jina-embeddings-v2-base-code` (Ollama),
 `nomic-ai/nomic-embed-code-GGUF` (LM Studio)
+
+² When you point `lumen index` at a directory that is **not itself a git
+repository**, it discovers the git repositories nested inside it and indexes
+each separately. If it finds **more than `LUMEN_MAX_NESTED_REPOS`** of them it
+refuses the whole directory rather than indexing a partial, misleading subset —
+a directory holding that many repositories is a home folder, a workspace, or a
+temp/cache tree, not a single project. The default of `64` sits well above a
+realistic hand-maintained multi-repo workspace (typically a few to a few dozen)
+while bounding discovery so it cannot run away under `$HOME`, `%TEMP%`, or a
+build cache. The boundary is exact: exactly `64` nested repos is accepted, the
+65th triggers refusal. Point lumen at a specific repository, or raise the value,
+for a workspace that legitimately holds more. A malformed value (empty, zero,
+negative, or non-numeric) is ignored and the default applies, so it can never
+disable the guard.
 
 ### Supported embedding models
 

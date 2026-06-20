@@ -40,7 +40,7 @@ func TestFindAncestorIndex(t *testing.T) {
 		t.Setenv("XDG_DATA_HOME", tmpDir)
 
 		// Create a fake DB for /project.
-		parentDBPath := config.DBPathForProject("/project", model)
+		parentDBPath := config.DBPathForProject(tp("/project"), model)
 		if err := os.MkdirAll(filepath.Dir(parentDBPath), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -48,9 +48,9 @@ func TestFindAncestorIndex(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got := findAncestorIndex("/project/scripts/util", model)
-		if got != "/project" {
-			t.Fatalf("expected /project, got %q", got)
+		got := findAncestorIndex(tp("/project/scripts/util"), model)
+		if got != tp("/project") {
+			t.Fatalf("expected %q, got %q", tp("/project"), got)
 		}
 	})
 
@@ -120,7 +120,7 @@ func TestFindAncestorIndex(t *testing.T) {
 		t.Setenv("XDG_DATA_HOME", tmpDir)
 
 		// Create fake DBs for both /project and /project/src.
-		for _, dir := range []string{"/project", "/project/src"} {
+		for _, dir := range []string{tp("/project"), tp("/project/src")} {
 			dbPath := config.DBPathForProject(dir, model)
 			if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 				t.Fatal(err)
@@ -131,9 +131,9 @@ func TestFindAncestorIndex(t *testing.T) {
 		}
 
 		// Searching from /project/src/pkg should find /project/src (nearest).
-		got := findAncestorIndex("/project/src/pkg", model)
-		if got != "/project/src" {
-			t.Fatalf("expected /project/src (nearest ancestor), got %q", got)
+		got := findAncestorIndex(tp("/project/src/pkg"), model)
+		if got != tp("/project/src") {
+			t.Fatalf("expected %q (nearest ancestor), got %q", tp("/project/src"), got)
 		}
 	})
 }

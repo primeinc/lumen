@@ -619,7 +619,6 @@ func TestIndexer_StaleUnsupportedExtensionNotCountedAsRemoved(t *testing.T) {
 	// The test passing without error means the ghost record was not propagated.
 }
 
-
 // TestIndexer_StaleUnsupportedExtensionDeletedFromDB verifies that after a
 // reindex, stale file records with unsupported extensions (e.g. .md from
 // donor seeding) are purged from the DB.
@@ -790,7 +789,11 @@ func Hello() {}
 	}
 	// Build the expected real hash using the Merkle tree so the test stays
 	// independent of hash implementation details.
-	curTree, treeErr := merkle.BuildTree(projectDir, makeSkip(projectDir))
+	skip, skipErr := makeSkip(projectDir)
+	if skipErr != nil {
+		t.Fatal(skipErr)
+	}
+	curTree, treeErr := merkle.BuildTree(projectDir, skip)
 	if treeErr != nil {
 		t.Fatal(treeErr)
 	}
@@ -799,6 +802,73 @@ func Hello() {}
 		if storedHash == realHash {
 			t.Errorf("file %q has its real hash %q committed after a failed flush — it will be invisible to future searches", path, storedHash)
 		}
+	}
+}
+
+// TestMakeSkip_RefusesOversizedRoot pins the MAJOR fix for the runaway-indexing
+// incident on the MCP/background path: makeSkip is the single chokepoint for
+// Index, EnsureFresh, and IsFresh, so an oversized non-git root must be refused
+// HERE — not only at the `lumen index` CLI — or the MCP server walks repos past
+// the limit and embeds the overflow into the parent index. A .git dir satisfies
+// IsGitRoot, so fake repos keep this fast and git-free.
+func TestMakeSkip_RefusesOversizedRoot(t *testing.T) {
+	mkRepos := func(t *testing.T, n int) string {
+		t.Helper()
+		parent := t.TempDir()
+		for i := range n {
+			repo := filepath.Join(parent, fmt.Sprintf("repo%d", i))
+			if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return parent
+	}
+
+	t.Run("refuses over the limit", func(t *testing.T) {
+		t.Setenv("LUMEN_MAX_NESTED_REPOS", "3")
+		skip, err := makeSkip(mkRepos(t, 6))
+		if err == nil {
+			t.Fatal("makeSkip should refuse an oversized non-git root, got nil error")
+		}
+		if skip != nil {
+			t.Error("makeSkip should return a nil SkipFunc when it refuses")
+		}
+		if !errors.Is(err, ErrTooManyNestedRepos) {
+			t.Errorf("error should wrap ErrTooManyNestedRepos, got %q", err.Error())
+		}
+	})
+
+	t.Run("allows at or under the limit", func(t *testing.T) {
+		t.Setenv("LUMEN_MAX_NESTED_REPOS", "3")
+		skip, err := makeSkip(mkRepos(t, 2))
+		if err != nil {
+			t.Fatalf("makeSkip(under-limit root) returned error: %v", err)
+		}
+		if skip == nil {
+			t.Error("makeSkip(under-limit root) returned a nil SkipFunc")
+		}
+	})
+}
+
+// TestMakeSkip_RefusesUnindexableRoot pins the universal temp/$HOME/system-root
+// refusal at the makeSkip chokepoint — covering the MCP/background path
+// (EnsureFresh) and IsFresh, not only the `lumen index` CLI. A .lumenignore
+// catch-all makes IsRootUnindexable true cross-platform, so this also runs on
+// Linux CI (unlike the Windows-only os.TempDir() refusal).
+func TestMakeSkip_RefusesUnindexableRoot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".lumenignore"), []byte("**\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	skip, err := makeSkip(dir)
+	if err == nil {
+		t.Fatal("makeSkip should refuse a root with a .lumenignore catch-all, got nil error")
+	}
+	if skip != nil {
+		t.Error("makeSkip should return a nil SkipFunc when it refuses")
+	}
+	if !strings.Contains(err.Error(), "refusing to index") {
+		t.Errorf("error should explain the refusal, got %q", err.Error())
 	}
 }
 
@@ -935,10 +1005,6 @@ func Nested() {}
 }
 
 func TestIndexer_SkipsPermissionDeniedFile(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root bypasses file permission checks")
-	}
-
 	dir := t.TempDir()
 	writeGoFile(t, dir, "ok.go", `package p
 
@@ -948,10 +1014,11 @@ func OK() {}
 
 func Secret() {}
 `)
-	if err := os.Chmod(filepath.Join(dir, "secret.go"), 0o000); err != nil {
-		t.Fatal(err)
+	// Make secret.go unreadable for the duration of the index: chmod(0) on Unix,
+	// an exclusive no-share handle on Windows (chmod does not deny reads there).
+	if !makeFileUnreadable(t, filepath.Join(dir, "secret.go")) {
+		t.Skip("cannot make a file unreadable in this environment (e.g. running as root)")
 	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "secret.go"), 0o644) })
 
 	emb := &mockEmbedder{dims: 4, model: "test-model"}
 	idx, err := NewIndexer(":memory:", emb, 0)

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -218,16 +219,14 @@ func TestCollectFilePaths_SkipsLargeFiles(t *testing.T) {
 }
 
 func TestBuildTree_SkipsPermissionDeniedFile(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root bypasses file permission checks")
-	}
 	dir := t.TempDir()
 	writeFile(t, dir, "accessible.go", "package main\n")
 	writeFile(t, dir, "secret.go", "package main\n")
-	if err := os.Chmod(filepath.Join(dir, "secret.go"), 0o000); err != nil {
-		t.Fatal(err)
+	// Make secret.go unreadable for the duration of the walk: chmod(0) on Unix,
+	// an exclusive no-share handle on Windows (chmod does not deny reads there).
+	if !makeFileUnreadable(t, filepath.Join(dir, "secret.go")) {
+		t.Skip("cannot make a file unreadable in this environment (e.g. running as root)")
 	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "secret.go"), 0o644) })
 
 	tree, err := BuildTree(dir, nil)
 	if err != nil {
@@ -238,6 +237,56 @@ func TestBuildTree_SkipsPermissionDeniedFile(t *testing.T) {
 	}
 	if _, ok := tree.Files["secret.go"]; ok {
 		t.Error("expected secret.go to be skipped")
+	}
+}
+
+// TestBuildTree_KeysAreForwardSlash pins the cross-platform indexing contract:
+// every tree.Files key is forward-slash separated regardless of host OS, so the
+// root hash, the stored file_path, chunk IDs, and embedding inputs are
+// byte-identical on Windows, macOS, and Linux. Without normalization Windows
+// filepath.Rel emits backslash keys, which break the store's "/"-anchored
+// scoped-search prefix filter and make an index non-portable across platforms.
+func TestBuildTree_KeysAreForwardSlash(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "top.go", "package main\n")
+	writeFile(t, dir, "sub/inner.go", "package sub\n")
+	writeFile(t, dir, "a/b/c/deep.go", "package c\n")
+
+	tree, err := BuildTree(dir, MakeSkip(dir, []string{".go"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for key := range tree.Files {
+		if strings.ContainsRune(key, '\\') {
+			t.Errorf("tree key %q contains a backslash; keys must be forward-slash on every platform", key)
+		}
+	}
+	for _, want := range []string{"top.go", "sub/inner.go", "a/b/c/deep.go"} {
+		if _, ok := tree.Files[want]; !ok {
+			t.Errorf("expected forward-slash key %q in tree, got keys: %v", want, tree.Files)
+		}
+	}
+}
+
+// TestMakeSkip_ExtensionCaseInsensitive pins the inclusion-side half of the
+// case-insensitive-filesystem contract: the extension filter must accept a
+// supported extension regardless of case (App.GO, notes.MD) — routine on
+// Windows/macOS — while still skipping genuinely unsupported extensions. Without
+// case folding an uppercase-extension source file is silently dropped from the
+// tree with no diagnostic.
+func TestMakeSkip_ExtensionCaseInsensitive(t *testing.T) {
+	skip := MakeSkip(t.TempDir(), []string{".go", ".md"})
+
+	for _, name := range []string{"Foo.GO", "bar.Md", "BAZ.go", "main.go", "readme.md"} {
+		if skip(name, false) {
+			t.Errorf("skip(%q) = true; a supported extension was rejected because of its case", name)
+		}
+	}
+	for _, name := range []string{"img.PNG", "blob.BIN"} {
+		if !skip(name, false) {
+			t.Errorf("skip(%q) = false; an unsupported extension should be skipped regardless of case", name)
+		}
 	}
 }
 

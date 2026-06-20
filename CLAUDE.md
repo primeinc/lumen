@@ -130,9 +130,23 @@ Codex, Cursor, and OpenCode reuse the same repo-root `skills/`, `hooks/`, and
 | `OLLAMA_HOST`            | `http://localhost:11434` | Ollama server URL                          |
 | `LM_STUDIO_HOST`         | `http://localhost:1234`  | LM Studio server URL                       |
 | `LUMEN_MAX_CHUNK_TOKENS` | `512`                    | Max tokens per chunk before splitting      |
+| `LUMEN_MAX_NESTED_REPOS` | `64`                     | Nested-repo ceiling for a non-git root ²   |
 
 ¹ `ordis/jina-embeddings-v2-base-code` (Ollama),
 `nomic-ai/nomic-embed-code-GGUF` (LM Studio)
+
+² Operational policy, not a tuning knob. When `lumen index` targets a directory
+that is **not itself a git repository**, it indexes each nested git repo
+separately; finding **more than `LUMEN_MAX_NESTED_REPOS`** of them means the
+target is a home/workspace/temp tree rather than a single project, so the root
+is refused outright (the runaway-indexing guard from the 2026-06-19 incident).
+`64` sits above a realistic multi-repo workspace yet bounds discovery under
+`$HOME`/`%TEMP%`/build caches; discovery stops at the ceiling (`SkipAll`), so
+cost is bounded regardless of tree size. Boundary is exact (64 accepted, 65th
+refused). A malformed value (empty/zero/negative/non-numeric) falls back to the
+default — it can never disable or widen the guard. Defined as
+`DefaultMaxNestedRepos` in `internal/git/worktree.go`; the contract is covered
+by tests in `internal/git/worktree_test.go` and `internal/index/index_test.go`.
 
 ## Project Structure
 
