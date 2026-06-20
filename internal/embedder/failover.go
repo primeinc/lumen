@@ -37,6 +37,7 @@ type FailoverEmbedder struct {
 	cfg           *config.ConfigService
 	logger        *slog.Logger
 	mu            sync.Mutex
+	probeMu       sync.Mutex // serializes health probing so it runs outside mu
 	servers       []serverEntry
 	cachedConfigs []config.ServerConfig // snapshot at last init
 	active        int
@@ -74,33 +75,63 @@ func (f *FailoverEmbedder) ActiveServerIndex() int {
 // churning through embed batches that all fail. Lumen must remain usable when
 // the backend (e.g. Ollama) is not running; this is the gate that makes that so.
 func (f *FailoverEmbedder) Healthy() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.maybeReprobe(true) >= 0
+	return f.ensureReady(true) >= 0
 }
 
-// maybeReprobe checks whether servers need (re-)initialization and does so
-// if required. Must be called with f.mu held. Returns the current active index.
-func (f *FailoverEmbedder) maybeReprobe(log bool) int {
+// ensureReady (re-)initializes and health-probes the server list when needed and
+// returns the active server index (-1 if none is reachable). It must be called
+// WITHOUT f.mu held: the probes perform network I/O (up to healthCheckTimeout per
+// server), and holding f.mu across them would block every other embedder
+// operation (Embed/Dimensions/ModelName) for the duration. probeMu serializes
+// concurrent probers so the work happens once; results are committed under f.mu.
+func (f *FailoverEmbedder) ensureReady(log bool) int {
+	f.mu.Lock()
+	if !f.needsProbeLocked() {
+		active := f.active
+		f.mu.Unlock()
+		return active
+	}
+	f.mu.Unlock()
+
+	f.probeMu.Lock()
+	defer f.probeMu.Unlock()
+
+	// Another goroutine may have probed while we waited for probeMu.
+	f.mu.Lock()
+	if !f.needsProbeLocked() {
+		active := f.active
+		f.mu.Unlock()
+		return active
+	}
+	reprobe := f.checked && f.active < 0
+	f.mu.Unlock()
+	if reprobe && log && f.logger != nil {
+		f.logger.Info("re-probing embedding servers after cooldown")
+	}
+
+	servers, cached, active := f.probeAndSelect()
+
+	f.mu.Lock()
+	f.servers, f.cachedConfigs, f.active = servers, cached, active
+	f.checked = true
+	f.lastProbeTime = time.Now()
+	f.mu.Unlock()
+	return active
+}
+
+// needsProbeLocked reports whether the server list needs (re-)initialization or
+// a cooldown re-probe. Must be called with f.mu held.
+func (f *FailoverEmbedder) needsProbeLocked() bool {
 	needsInit := !f.checked || f.serversChanged()
 	needsReprobe := f.active < 0 && time.Since(f.lastProbeTime) >= reprobeInterval
-	if needsInit || needsReprobe {
-		if needsReprobe && log && f.logger != nil {
-			f.logger.Info("re-probing embedding servers after cooldown")
-		}
-		f.initServers()
-		f.checked = true
-	}
-	return f.active
+	return needsInit || needsReprobe
 }
 
 // Dimensions returns dims for the active server. On first call it probes
 // servers for health to ensure the returned dimensions match the server
 // that will actually handle embeddings.
 func (f *FailoverEmbedder) Dimensions() int {
-	f.mu.Lock()
-	idx := f.maybeReprobe(false)
-	f.mu.Unlock()
+	idx := f.ensureReady(false)
 	if idx < 0 {
 		idx = 0
 	}
@@ -111,9 +142,7 @@ func (f *FailoverEmbedder) Dimensions() int {
 // probes servers for health to ensure the returned name matches the server
 // that will actually handle embeddings.
 func (f *FailoverEmbedder) ModelName() string {
-	f.mu.Lock()
-	idx := f.maybeReprobe(false)
-	f.mu.Unlock()
+	idx := f.ensureReady(false)
 	if idx < 0 {
 		idx = 0
 	}
@@ -128,11 +157,7 @@ func (f *FailoverEmbedder) ModelName() string {
 // all servers for health and selects the first healthy one. On transient
 // errors (5xx, network) it fails over to the next healthy server.
 func (f *FailoverEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	f.mu.Lock()
-	f.maybeReprobe(true)
-	f.mu.Unlock()
-
-	if f.active < 0 {
+	if f.ensureReady(true) < 0 {
 		return nil, fmt.Errorf("all embedding servers are unhealthy")
 	}
 
@@ -197,38 +222,39 @@ func (f *FailoverEmbedder) serversChanged() bool {
 	return false
 }
 
-// initServers initializes the server list and probes for the first healthy
-// server. Must be called with f.mu held.
-func (f *FailoverEmbedder) initServers() {
-	f.lastProbeTime = time.Now()
-	servers := f.cfg.Servers()
-	f.servers = make([]serverEntry, len(servers))
-	f.cachedConfigs = make([]config.ServerConfig, len(servers))
-	copy(f.cachedConfigs, servers)
-	f.active = -1
-	for i := range servers {
-		f.servers[i] = serverEntry{}
-	}
+// probeAndSelect probes each configured server (network I/O; must run WITHOUT
+// f.mu held) and returns the new server entries, a snapshot of their configs,
+// and the index of the first healthy, constructible server (-1 if none). It
+// reads only f.cfg and f.logger and does not touch f's shared mutable state; the
+// caller commits the result under f.mu.
+func (f *FailoverEmbedder) probeAndSelect() ([]serverEntry, []config.ServerConfig, int) {
+	cfgServers := f.cfg.Servers()
+	servers := make([]serverEntry, len(cfgServers))
+	cached := make([]config.ServerConfig, len(cfgServers))
+	copy(cached, cfgServers)
 	if f.logger != nil {
-		f.logger.Info("probing embedding servers", "count", len(servers))
+		f.logger.Info("probing embedding servers", "count", len(cfgServers))
 	}
-	for i := range f.servers {
-		if f.probeHealth(i) {
-			f.servers[i].healthy = true
-			if err := f.ensureEmbedder(i); err == nil {
-				f.active = i
-				if f.logger != nil {
-					srv := servers[i]
-					f.logger.Info("selected embedding server", "server", i, "backend", srv.Backend, "host", srv.Host, "model", srv.Model)
-				}
-				return
-			}
-			// ensureEmbedder failed (e.g. unknown backend); try next server
+	for i := range servers {
+		if !f.probeHealth(i) {
+			continue
 		}
+		servers[i].healthy = true
+		emb, err := f.newEmbedderFor(i)
+		if err != nil {
+			continue // e.g. unknown backend; try next server
+		}
+		servers[i].emb = emb
+		if f.logger != nil {
+			srv := cfgServers[i]
+			f.logger.Info("selected embedding server", "server", i, "backend", srv.Backend, "host", srv.Host, "model", srv.Model)
+		}
+		return servers, cached, i
 	}
 	if f.logger != nil {
 		f.logger.Warn("no healthy embedding server found")
 	}
+	return servers, cached, -1
 }
 
 // findNextHealthy probes servers after index `after` and returns the first
@@ -275,27 +301,30 @@ func (f *FailoverEmbedder) probeHealth(i int) bool {
 	return true
 }
 
+// newEmbedderFor constructs the backend embedder for server i without touching
+// f's shared state, so it is safe to call without f.mu held.
+func (f *FailoverEmbedder) newEmbedderFor(i int) (Embedder, error) {
+	servers := f.cfg.Servers()
+	srv := servers[i]
+	dims := f.cfg.ServerDims(i)
+	ctxLen := f.cfg.ServerCtxLength(i)
+	switch srv.Backend {
+	case "ollama":
+		return NewOllama(srv.Model, dims, ctxLen, srv.Host)
+	case "lmstudio":
+		return NewLMStudio(srv.Model, dims, srv.Host)
+	default:
+		return nil, fmt.Errorf("unknown backend %q", srv.Backend)
+	}
+}
+
 // ensureEmbedder lazily initializes the backend embedder for server i.
 // Must be called with f.mu held.
 func (f *FailoverEmbedder) ensureEmbedder(i int) error {
 	if f.servers[i].emb != nil {
 		return nil
 	}
-	servers := f.cfg.Servers()
-	srv := servers[i]
-	dims := f.cfg.ServerDims(i)
-	ctxLen := f.cfg.ServerCtxLength(i)
-
-	var emb Embedder
-	var err error
-	switch srv.Backend {
-	case "ollama":
-		emb, err = NewOllama(srv.Model, dims, ctxLen, srv.Host)
-	case "lmstudio":
-		emb, err = NewLMStudio(srv.Model, dims, srv.Host)
-	default:
-		return fmt.Errorf("unknown backend %q", srv.Backend)
-	}
+	emb, err := f.newEmbedderFor(i)
 	if err != nil {
 		return err
 	}
