@@ -49,7 +49,11 @@ var (
 // is set, it writes got to the golden file instead.
 func assertGolden(t *testing.T, goldenPath, got string) {
 	t.Helper()
-	got = strings.TrimRight(got, "\n")
+	// Normalize CRLF -> LF so the comparison is line-ending agnostic. On Windows
+	// the golden and snippet testdata files may be checked out with CRLF (git
+	// autocrlf) while formatSearchResults emits LF; the format under test does not
+	// depend on line endings.
+	got = strings.TrimRight(strings.ReplaceAll(got, "\r\n", "\n"), "\n")
 	if *updateGolden {
 		if err := os.WriteFile(goldenPath, []byte(got+"\n"), 0o644); err != nil {
 			t.Fatalf("update golden: %v", err)
@@ -60,7 +64,7 @@ func assertGolden(t *testing.T, goldenPath, got string) {
 	if err != nil {
 		t.Fatalf("read golden file: %v", err)
 	}
-	want := strings.TrimRight(string(golden), "\n")
+	want := strings.TrimRight(strings.ReplaceAll(string(golden), "\r\n", "\n"), "\n")
 	if got != want {
 		t.Fatalf("output does not match golden file %s (run with -update-golden to refresh).\n\nGOT:\n%s\n\nWANT:\n%s", goldenPath, got, want)
 	}

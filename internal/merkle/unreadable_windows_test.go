@@ -17,18 +17,24 @@
 package merkle
 
 import (
+	"os"
 	"syscall"
 	"testing"
 )
 
-// makeFileUnreadable holds an exclusive (no-share) handle on path until the
-// test ends, so any subsequent open — including the indexer's os.ReadFile —
-// fails with ERROR_SHARING_VIOLATION. This is the Windows equivalent of a
-// permission-denied / locked file (an editor or antivirus holding the file
-// open). chmod(0) does NOT deny reads on Windows, so it cannot exercise the
-// skip-inaccessible path; an exclusive handle reliably can, independent of
-// process elevation. Always returns true: the precondition is enforced by the
-// filesystem, not by permission bits a privileged token could bypass.
+// makeFileUnreadable holds an exclusive (no-share) handle on path so any
+// subsequent open -- including the indexer's os.ReadFile -- fails with
+// ERROR_SHARING_VIOLATION, the Windows equivalent of a permission-denied /
+// locked file (an editor or antivirus holding the file open). chmod(0) does NOT
+// deny reads on Windows.
+//
+// Returns false (the caller skips) when the precondition cannot be established:
+// the exclusive open fails, or -- probed explicitly -- the handle does not
+// actually block a read in this environment. Some CI runners execute with a
+// privileged token that bypasses the share restriction; there a file genuinely
+// cannot be made unreadable, so the test skips honestly rather than asserting a
+// guarantee the OS will not honor. The classification itself is covered
+// unconditionally by TestIsInaccessibleErr_Windows.
 func makeFileUnreadable(t *testing.T, path string) bool {
 	t.Helper()
 	p, err := syscall.UTF16PtrFromString(path)
@@ -45,7 +51,13 @@ func makeFileUnreadable(t *testing.T, path string) bool {
 		0,
 	)
 	if err != nil {
-		t.Fatalf("exclusive open %s: %v", path, err)
+		return false // could not take an exclusive handle
+	}
+	if _, rerr := os.ReadFile(path); rerr == nil {
+		// The exclusive handle did not block a read here (privileged/bypassing
+		// token) -- can't establish the precondition.
+		_ = syscall.CloseHandle(h)
+		return false
 	}
 	t.Cleanup(func() { _ = syscall.CloseHandle(h) })
 	return true

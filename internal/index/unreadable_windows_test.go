@@ -17,15 +17,22 @@
 package index
 
 import (
+	"os"
 	"syscall"
 	"testing"
 )
 
-// makeFileUnreadable holds an exclusive (no-share) handle on path until the
-// test ends, so the indexer's os.ReadFile fails with ERROR_SHARING_VIOLATION —
-// the Windows equivalent of a permission-denied / locked file. chmod(0) does
-// not deny reads on Windows. Always returns true: the precondition is enforced
-// by the filesystem, independent of process elevation.
+// makeFileUnreadable holds an exclusive (no-share) handle on path so the
+// indexer's os.ReadFile fails with ERROR_SHARING_VIOLATION -- the Windows
+// equivalent of a permission-denied / locked file. chmod(0) does not deny reads
+// on Windows.
+//
+// Returns false (the caller skips) when the precondition cannot be established:
+// the exclusive open fails, or -- probed explicitly -- the handle does not
+// actually block a read in this environment (some CI runners run with a
+// privileged token that bypasses the share restriction). The skip-inaccessible
+// classification is covered unconditionally by the merkle package's
+// TestIsInaccessibleErr_Windows.
 func makeFileUnreadable(t *testing.T, path string) bool {
 	t.Helper()
 	p, err := syscall.UTF16PtrFromString(path)
@@ -42,7 +49,11 @@ func makeFileUnreadable(t *testing.T, path string) bool {
 		0,
 	)
 	if err != nil {
-		t.Fatalf("exclusive open %s: %v", path, err)
+		return false // could not take an exclusive handle
+	}
+	if _, rerr := os.ReadFile(path); rerr == nil {
+		_ = syscall.CloseHandle(h)
+		return false
 	}
 	t.Cleanup(func() { _ = syscall.CloseHandle(h) })
 	return true
