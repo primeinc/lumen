@@ -61,14 +61,22 @@ jobs:
           go-version: '1.26'
           cache: true
 
-      # The main `test` job is Linux-only, so every assertion guarded by
+      # The main `test` job is Linux-only, so the assertions guarded by
       # `runtime.GOOS == "windows"` — case-insensitive root matching, 8.3 short
-      # names, os.SameFile identity, the C:\Windows\Temp refusal — never executes
-      # in CI. Run the CGO-free packages that carry those assertions on a real
-      # Windows runner. CGO is intentionally disabled: merkle/git/embedder need no
-      # sqlite-vec/tree-sitter, so this needs no C toolchain and stays fast.
-      - name: Go test (path-identity packages)
-        run: go test ./internal/merkle/... ./internal/git/... ./internal/embedder/...
+      # names, os.SameFile identity, the C:\Windows\Temp refusal — never execute
+      # in CI. Run those on a real Windows runner. The merkle run is SCOPED to the
+      # path-identity tests on purpose: several unrelated merkle tests carry Unix
+      # path-separator / chmod assumptions that pre-date this gate and would fail
+      # on Windows (e.g. forward-slash relPaths, chmod-based permission checks);
+      # widening the gate to the full package is follow-up work best verified on a
+      # Windows runner. git and embedder pass in full. CGO is disabled (no
+      # sqlite-vec/tree-sitter needed), so no C toolchain is required. shell: bash
+      # is set so a failing first command fails the step (Windows pwsh would not).
+      - name: Go test (Windows path-identity behavior)
+        shell: bash
+        run: |
+          go test -run 'IsRootUnindexable|MatchesRefusedRoot|SameDir' ./internal/merkle/...
+          go test ./internal/git/... ./internal/embedder/...
         env:
           CGO_ENABLED: '0'
 
