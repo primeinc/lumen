@@ -123,12 +123,37 @@ func IsGitRoot(path string) bool {
 	return err == nil
 }
 
-// DefaultMaxNestedRepos is the default cap on how many nested git repositories
-// DiscoverNestedGitRepos returns from a single non-git root, overridable via the
-// LUMEN_MAX_NESTED_REPOS environment variable. A non-git directory holding more
-// than this many nested repos is not a meaningful single index root — it is a
-// home or workspace directory, or the system temp tree — and the caller refuses
-// such a root outright rather than indexing a partial, misleading subset.
+// DefaultMaxNestedRepos is the default ceiling on how many nested git
+// repositories DiscoverNestedGitRepos will enumerate under a single NON-git
+// root before the caller refuses that root outright. It is the operational
+// policy that separates "a workspace holding a handful of checkouts" (a
+// legitimate, if unusual, index root) from "a home directory, a system temp
+// tree, or a CI cache" (never an index root — walking it is the runaway the
+// 2026-06-19 incident produced).
+//
+// Why 64 specifically: nested-repo discovery only runs when the root is itself
+// NOT a git repository, so monorepos and ordinary single-project roots never
+// reach this path. The remaining case is a directory a developer fills with
+// sibling clones; in practice those hold a few to a few dozen repos, so 64 sits
+// comfortably above real multi-repo workspaces while staying far below the
+// hundreds-to-thousands of repositories found under $HOME, %TEMP%, or a build
+// cache. The number is a heuristic threshold, not a hard resource limit: the
+// walk stops descending the moment it exceeds the ceiling (filepath.SkipAll),
+// so the cost of discovery is bounded at ~64 repo roots regardless of how large
+// the underlying tree is.
+//
+// Contract:
+//   - Boundary is exact. Exactly DefaultMaxNestedRepos nested repos is accepted
+//     and indexed; the next one (count > limit) trips the refusal. See
+//     DiscoverNestedGitRepos and TooManyNestedReposError.
+//   - Override. Set LUMEN_MAX_NESTED_REPOS to a positive integer to raise or
+//     lower the ceiling for an unusual but legitimate workspace; the refusal
+//     message names the variable so an operator knows the knob exists.
+//   - Malformed override fails safe. Any non-positive or non-numeric value
+//     (empty, "0", "-5", "lots") is ignored and the default applies, so a bad
+//     value can never disable or widen the guard. See maxNestedReposLimit.
+//
+// Documented for users in README.md and CLAUDE.md (Environment Variables).
 const DefaultMaxNestedRepos = 64
 
 // maxNestedReposLimit returns the nested-repo cap. A LUMEN_MAX_NESTED_REPOS
