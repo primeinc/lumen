@@ -180,24 +180,45 @@ func (f *FailoverEmbedder) Embed(ctx context.Context, texts []string) ([][]float
 			return nil, err // 4xx = config error, don't failover
 		}
 
-		// Mark current as unhealthy, find next
+		// Mark the current server unhealthy, then probe candidates for the next
+		// healthy one WITHOUT holding f.mu: probeHealth performs network I/O (up to
+		// healthCheckTimeout per server) and must not stall concurrent Embed /
+		// Healthy / Dimensions / ModelName calls that only need the mutex briefly.
 		f.mu.Lock()
 		f.servers[active].healthy = false
-		next := f.findNextHealthy(active)
+		serverCount := len(f.servers)
+		f.mu.Unlock()
+
+		next := -1
+		for i := active + 1; i < serverCount; i++ {
+			if f.probeHealth(i) { // network I/O; reads only f.cfg, no f.mu held
+				next = i
+				break
+			}
+		}
 		if next < 0 {
+			f.mu.Lock()
 			f.active = -1
 			f.mu.Unlock()
 			return nil, fmt.Errorf("all embedding servers exhausted after failover: last error: %w", err)
 		}
+
+		f.mu.Lock()
+		if next >= len(f.servers) {
+			// A concurrent reload shrank the server list out from under us.
+			f.mu.Unlock()
+			return nil, fmt.Errorf("all embedding servers exhausted after failover: last error: %w", err)
+		}
+		f.servers[next].healthy = true
 		if f.logger != nil {
 			f.logger.Warn("embedding server failed, trying next", "failed", active, "next", next, "error", err)
 		}
 		f.active = next
-		if err := f.ensureEmbedder(next); err != nil {
-			f.mu.Unlock()
-			return nil, fmt.Errorf("failed to initialize fallback server %d: %w", next, err)
-		}
+		initErr := f.ensureEmbedder(next)
 		f.mu.Unlock()
+		if initErr != nil {
+			return nil, fmt.Errorf("failed to initialize fallback server %d: %w", next, initErr)
+		}
 		// Loop continues with new active server
 	}
 }
@@ -255,18 +276,6 @@ func (f *FailoverEmbedder) probeAndSelect() ([]serverEntry, []config.ServerConfi
 		f.logger.Warn("no healthy embedding server found")
 	}
 	return servers, cached, -1
-}
-
-// findNextHealthy probes servers after index `after` and returns the first
-// healthy one, or -1 if none found. Must be called with f.mu held.
-func (f *FailoverEmbedder) findNextHealthy(after int) int {
-	for i := after + 1; i < len(f.servers); i++ {
-		if f.probeHealth(i) {
-			f.servers[i].healthy = true
-			return i
-		}
-	}
-	return -1
 }
 
 // probeHealth checks if server i is healthy by sending a GET request.
