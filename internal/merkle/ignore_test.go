@@ -353,18 +353,21 @@ func TestSameDir(t *testing.T) {
 // equals the target only after symlink resolution, using the input's RESOLVED
 // form. A clean-vs-clean compare alone would miss it and let the guard escape.
 func TestSameDirWithInfo_MatchesViaResolvedFormWhenIdentityUnconfirmed(t *testing.T) {
-	target := t.TempDir()
-	link := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlinks unsupported on this platform: %v", err)
+	// On the degraded branch (aErr != nil — os.SameFile cannot confirm identity,
+	// e.g. the Windows loadFileId failure on an un-openable directory), a path
+	// whose RESOLVED form equals the target must still match even though its
+	// CLEANED (literal) form does not; a clean-vs-clean fallback alone would miss
+	// it and narrow the $HOME/temp guard. Pure string inputs keep this hermetic
+	// and platform-independent — filepath.Clean/pathsEqual normalize separators
+	// and case — without depending on temp-dir symlink canonicalization, which
+	// diverges between os.Stat-resolved and lexically-cleaned forms on Windows.
+	cleanA := filepath.Clean("/link/that/points/elsewhere")
+	resolvedA := filepath.Clean("/real/target")
+	b := "/real/target"
+	if pathsEqual(cleanA, filepath.Clean(b)) {
+		t.Fatal("precondition: the cleaned (literal) form must differ from the target")
 	}
-	cleanA := filepath.Clean(link)
-	resolvedA := resolvePath(link) // resolves through the symlink to target
-	if pathsEqual(cleanA, filepath.Clean(target)) {
-		t.Fatal("precondition: the symlink path should differ from its target")
-	}
-	// aErr != nil forces the string fallback (os.SameFile branch skipped).
-	if !sameDirWithInfo(nil, os.ErrPermission, cleanA, resolvedA, target) {
+	if !sameDirWithInfo(nil, os.ErrPermission, cleanA, resolvedA, b) {
 		t.Error("sameDirWithInfo did not match via the resolved form; the $HOME/temp guard is narrowed")
 	}
 }
