@@ -50,10 +50,10 @@ func TestRunIndex_RefusesOversizedNestedRoot(t *testing.T) {
 	// CLI. A .git dir satisfies IsGitRoot, so fake repos keep this fast and
 	// backend-free; the low cap keeps the fixture small.
 	//
-	// Isolate XDG_CONFIG_HOME so the test never reads a developer's real
-	// ~/.config/lumen/config.yaml: loadConfigWithFlags runs before the
-	// nested-repo refusal, so without this the test is non-hermetic.
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// Isolate config + embedding env so the test never reads a developer's real
+	// ~/.config/lumen/config.yaml or backend overrides: loadConfigWithFlags runs
+	// before the nested-repo refusal, so without this the test is non-hermetic.
+	isolateConfigEnv(t)
 	t.Setenv("LUMEN_MAX_NESTED_REPOS", "2")
 	dir := t.TempDir()
 	for _, name := range []string{"a", "b", "c", "d", "e"} {
@@ -75,8 +75,7 @@ func TestIndexingWorkPending(t *testing.T) {
 	// runIndex must not require a live embedding backend for an already-fresh
 	// index (a no-op that embeds nothing); it must still require one when there is
 	// real work. These cover the three signals indexingWorkPending reports on.
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	isolateConfigEnv(t)
 
 	cfg, err := config.NewConfigService("")
 	if err != nil {
@@ -164,3 +163,19 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 
 func (f *fakeEmbedder) Dimensions() int   { return f.dims }
 func (f *fakeEmbedder) ModelName() string { return f.model }
+
+// isolateConfigEnv points the config/data dirs at temp dirs and clears the
+// embedding-related environment variables the config reads, so a developer's
+// real ~/.config/lumen/config.yaml or backend overrides cannot contaminate a
+// test that loads config or constructs an embedder.
+func isolateConfigEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, k := range []string{
+		"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "LUMEN_EMBED_DIMS",
+		"LUMEN_EMBED_CTX", "OLLAMA_HOST", "LM_STUDIO_HOST",
+	} {
+		t.Setenv(k, "")
+	}
+}
