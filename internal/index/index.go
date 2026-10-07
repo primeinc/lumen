@@ -18,12 +18,14 @@ package index
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,7 +41,10 @@ import (
 var supportedExts = func() map[string]bool {
 	m := make(map[string]bool, len(chunker.SupportedExtensions()))
 	for _, ext := range chunker.SupportedExtensions() {
-		m[ext] = true
+		// Keys are folded to lower case so the stale-record purge matches the
+		// case-insensitive filesystem semantics of Windows and macOS; see the
+		// strings.ToLower lookups below.
+		m[strings.ToLower(ext)] = true
 	}
 	return m
 }()
@@ -136,25 +141,64 @@ func (idx *Indexer) Close() error {
 	return idx.store.Close()
 }
 
+// ErrTooManyNestedRepos is the sentinel wrapped by TooManyNestedReposError.
+// Callers that need to distinguish this refusal from other indexing errors
+// should match it with errors.Is rather than comparing the message string.
+var ErrTooManyNestedRepos = errors.New("too many nested git repositories")
+
+// TooManyNestedReposError formats the refusal used when a non-git root contains
+// more nested git repositories than the configured limit — a signal it is a
+// workspace/home/temp directory rather than a single project. count is the cap
+// at which discovery stopped (the limit), so the actual number of nested repos
+// is strictly greater than count; the message says "more than %d" accordingly.
+// The result wraps ErrTooManyNestedRepos so it can be matched with errors.Is.
+func TooManyNestedReposError(root string, count int) error {
+	return fmt.Errorf("refusing to index %s: %w — found more than %d (this looks like a workspace/home/temp directory, not a single project); point lumen at a specific repository, or raise LUMEN_MAX_NESTED_REPOS", root, ErrTooManyNestedRepos, count)
+}
+
 // makeSkip returns a SkipFunc for projectDir that excludes internal worktrees
 // and, when projectDir is not itself a git repository, any nested git repos.
-func makeSkip(projectDir string) merkle.SkipFunc {
+//
+// It returns an error when projectDir is not a git repository and holds more
+// nested git repositories than the configured limit. Refusing here — rather
+// than at a single caller — is load-bearing: every indexing entry point
+// (Index, EnsureFresh, IsFresh) goes through makeSkip, so the MCP/background
+// path refuses the same oversized roots as the CLI instead of skipping only
+// the first N nested repos and embedding the overflow into the parent index.
+func makeSkip(projectDir string) (merkle.SkipFunc, error) {
+	// Refuse roots that should never be an index root — the system temp dir,
+	// $HOME, a hardcoded system root, or a directory whose .lumenignore is a
+	// catch-all — here at the shared chokepoint, so EVERY caller (Index,
+	// EnsureFresh on the MCP/background path, and IsFresh) refuses them, not
+	// just the `lumen index` CLI. IsRootUnindexable matches by directory
+	// identity, so a normal project nested under temp/$HOME is unaffected.
+	if unindexable, reason := merkle.IsRootUnindexable(projectDir); unindexable {
+		return nil, fmt.Errorf("refusing to index %s: %s", projectDir, reason)
+	}
 	extraSkip := git.InternalWorktreePaths(projectDir)
 	if !git.IsGitRoot(projectDir) {
-		for _, repoPath := range git.DiscoverNestedGitRepos(projectDir) {
+		nestedRepos, truncated := git.DiscoverNestedGitRepos(projectDir)
+		if truncated {
+			return nil, TooManyNestedReposError(projectDir, len(nestedRepos))
+		}
+		for _, repoPath := range nestedRepos {
 			if rel, err := filepath.Rel(projectDir, repoPath); err == nil {
 				extraSkip = append(extraSkip, rel)
 			}
 		}
 	}
-	return merkle.MakeSkipWithExtra(projectDir, chunker.SupportedExtensions(), extraSkip)
+	return merkle.MakeSkipWithExtra(projectDir, chunker.SupportedExtensions(), extraSkip), nil
 }
 
 // Index indexes the project at projectDir. If force is true, all files are
 // re-indexed regardless of whether they have changed.
 func (idx *Indexer) Index(ctx context.Context, projectDir string, force bool, progress ProgressFunc) (Stats, error) {
 	// Build tree outside the lock: it is read-only and can be slow for large projects.
-	curTree, err := merkle.BuildTree(projectDir, makeSkip(projectDir))
+	skip, err := makeSkip(projectDir)
+	if err != nil {
+		return Stats{}, err
+	}
+	curTree, err := merkle.BuildTree(projectDir, skip)
 	if err != nil {
 		return Stats{}, fmt.Errorf("build merkle tree: %w", err)
 	}
@@ -219,7 +263,11 @@ func (idx *Indexer) Index(ctx context.Context, projectDir string, force bool, pr
 // Returns whether a re-index occurred, the stats, and any error.
 func (idx *Indexer) EnsureFresh(ctx context.Context, projectDir string, progress ProgressFunc) (bool, Stats, error) {
 	// Build tree outside the lock: it is read-only and can be slow for large projects.
-	curTree, err := merkle.BuildTree(projectDir, makeSkip(projectDir))
+	skip, err := makeSkip(projectDir)
+	if err != nil {
+		return false, Stats{}, err
+	}
+	curTree, err := merkle.BuildTree(projectDir, skip)
 	if err != nil {
 		return false, Stats{}, fmt.Errorf("build merkle tree: %w", err)
 	}
@@ -290,7 +338,7 @@ func (idx *Indexer) indexWithTree(ctx context.Context, projectDir, oldRootHash s
 	// Purge stale records with unsupported extensions — applies in both
 	// force and incremental paths to clean up donor-seeded .md etc. records.
 	for path := range oldHashes {
-		if !supportedExts[filepath.Ext(path)] {
+		if !supportedExts[strings.ToLower(filepath.Ext(path))] {
 			if err := idx.store.DeleteFileChunks(path); err != nil {
 				return stats, fmt.Errorf("purge stale file %s: %w", path, err)
 			}
@@ -415,7 +463,11 @@ func (idx *Indexer) indexWithTree(ctx context.Context, projectDir, oldRootHash s
 		absPath := filepath.Join(projectDir, relPath)
 		content, err := os.ReadFile(absPath)
 		if err != nil {
-			if os.IsPermission(err) {
+			// A file that cannot be read right now — permission denied, or on
+			// Windows held open by another process without read sharing — is
+			// skipped for this pass rather than failing the whole index. The
+			// next run retries it once the condition clears.
+			if merkle.IsInaccessibleErr(err) {
 				if idx.logger != nil {
 					idx.logger.Warn("skipping inaccessible file", "path", relPath, "error", err)
 				}
@@ -537,7 +589,11 @@ func (idx *Indexer) LastIndexedAt() (time.Time, bool) {
 // IsFresh does not acquire the indexer mutex; it reads through the store's
 // read-only connection (SQLite WAL isolation).
 func (idx *Indexer) IsFresh(projectDir string) (bool, error) {
-	curTree, err := merkle.BuildTree(projectDir, makeSkip(projectDir))
+	skip, err := makeSkip(projectDir)
+	if err != nil {
+		return false, err
+	}
+	curTree, err := merkle.BuildTree(projectDir, skip)
 	if err != nil {
 		return false, fmt.Errorf("build merkle tree: %w", err)
 	}

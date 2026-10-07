@@ -14,7 +14,10 @@
 
 package chunker
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // MultiChunker dispatches to per-extension Chunkers.
 // Files with unrecognized extensions return nil, nil.
@@ -31,7 +34,11 @@ func NewMultiChunker(chunkers map[string]Chunker) *MultiChunker {
 // Chunk dispatches to the appropriate Chunker based on file extension.
 // Returns nil, nil for unsupported extensions.
 func (m *MultiChunker) Chunk(filePath string, content []byte) ([]Chunk, error) {
-	ext := filepath.Ext(filePath)
+	// Fold the extension to lower case so a file the OS treats as e.g. Foo.GO
+	// (routine on case-insensitive Windows/macOS filesystems) dispatches to the
+	// Go chunker rather than silently returning no chunks. Map keys are the
+	// lower-case canonical extensions registered in DefaultLanguages.
+	ext := strings.ToLower(filepath.Ext(filePath))
 	c, ok := m.chunkers[ext]
 	if !ok {
 		return nil, nil

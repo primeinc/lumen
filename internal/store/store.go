@@ -35,6 +35,15 @@ func init() {
 // IsCorruptionErr reports whether err indicates SQLite database corruption.
 // These are the canonical SQLite error messages for an unrecoverable on-disk
 // data problem; the only safe recovery is to delete the database and rebuild.
+//
+// This intentionally matches the message text rather than a typed sqlite3.Error
+// code (errors.As). Two reasons: (1) the driver is registered via a blank import
+// (`_ "github.com/mattn/go-sqlite3"`) so its error type is deliberately not in
+// scope — un-blanking it solely for two codes would add the coupling that blank
+// import avoids; (2) these strings are emitted by SQLite core and survive lossy
+// `%s` wrapping that erases a typed *sqlite3.Error, while the messages themselves
+// are specific enough that a substring false positive is implausible. lumen's own
+// refusal errors that callers branch on use sentinels (e.g. ErrTooManyNestedRepos).
 func IsCorruptionErr(err error) bool {
 	if err == nil {
 		return false

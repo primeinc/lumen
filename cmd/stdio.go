@@ -614,10 +614,13 @@ func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallT
 	maxDistance := computeMaxDistance(input.MinScore, modelName, ic.embedder.Dimensions())
 
 	// When searching a subdirectory, filter results to that prefix only.
+	// Normalize to forward slashes: stored file_path keys are slash-form on
+	// every platform and store.Search anchors the prefix on "/", so a backslash
+	// prefix from filepath.Rel on Windows would silently match nothing.
 	var pathPrefix string
 	if input.Path != effectiveRoot {
 		if rel, relErr := filepath.Rel(effectiveRoot, input.Path); relErr == nil && rel != "." {
-			pathPrefix = rel
+			pathPrefix = filepath.ToSlash(rel)
 		}
 	}
 

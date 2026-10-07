@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -108,7 +109,11 @@ type IgnoreTree struct {
 func NewIgnoreTree(rootDir string, exts []string) *IgnoreTree {
 	extSet := make(map[string]bool, len(exts))
 	for _, ext := range exts {
-		extSet[ext] = true
+		// Fold case so the extension filter matches files the OS treats as the
+		// same name. On case-insensitive filesystems (Windows, macOS) App.PY and
+		// app.py are one file; without folding, an uppercase-extension source
+		// file is silently never collected into the tree.
+		extSet[strings.ToLower(ext)] = true
 	}
 	t := &IgnoreTree{
 		rootDir: rootDir,
@@ -155,7 +160,7 @@ func (t *IgnoreTree) shouldSkip(relPath string, isDir bool) bool {
 	if isDir && SkipDirs[base] {
 		return true
 	}
-	if isDir && t.extraSkipDirs[relPath] {
+	if isDir && t.extraSkipDirs[filepath.ToSlash(relPath)] {
 		return true
 	}
 	if !isDir && SkipFiles[base] {
@@ -177,12 +182,15 @@ func (t *IgnoreTree) shouldSkip(relPath string, isDir bool) bool {
 		}
 	}
 
-	return !isDir && !t.extSet[filepath.Ext(relPath)]
+	return !isDir && !t.extSet[strings.ToLower(filepath.Ext(relPath))]
 }
 
 func (t *IgnoreTree) checkIgnoreRules(relPath, anc string, isDir bool) bool {
 	d := t.loadDir(anc)
-	pathFromAnc := getPathFromAncestor(relPath, anc)
+	// Normalize to forward slashes so the path handed to the gitignore matchers
+	// is uniformly slash-separated rather than the mixed "a\b/" form that
+	// appending "/" to a backslash filepath.Rel result would produce on Windows.
+	pathFromAnc := filepath.ToSlash(getPathFromAncestor(relPath, anc))
 	matchPath := pathFromAnc
 	if isDir {
 		matchPath = pathFromAnc + "/"
@@ -333,18 +341,156 @@ func resolvePath(dir string) string {
 	return filepath.Clean(dir)
 }
 
+// pathsEqual compares two cleaned paths. On Windows the filesystem is
+// case-insensitive and the OS reports system paths with inconsistent casing
+// (e.g. C:\WINDOWS vs C:\Windows), so the comparison folds case there; on other
+// platforms it is exact.
+func pathsEqual(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// sameDir reports whether a and b refer to the same directory. It prefers
+// os.SameFile when both paths exist on disk — which compares the volume + file
+// index (NTFS file ID on Windows, device+inode on Unix) and so is invariant to
+// case, Windows 8.3 short names (e.g. ADMINI~1), and symlinks.
+//
+// It falls back to a cleaned, case-folded-on-Windows string compare whenever
+// identity is NOT confirmed: either path absent, or os.SameFile false. The
+// latter matters because os.SameFile's Windows path (loadFileId) re-opens each
+// path with CreateFile(OPEN_EXISTING) and returns false if that open fails —
+// so a directory that can be stat'd but not opened (e.g. permissions) would
+// otherwise escape the refusal. os.SameFile requires os.Stat results, so both
+// are stat'd here.
+func sameDir(a, b string) bool {
+	ai, err := os.Stat(a)
+	return sameDirWithInfo(ai, err, filepath.Clean(a), resolvePath(a), b)
+}
+
+// sameDirWithInfo is sameDir with a's os.Stat result and both its cleaned and
+// symlink-resolved forms supplied by the caller, so a single stat + resolve of a
+// can be reused across many candidate b values (e.g. the whole refusedRoots set)
+// instead of recomputing them per comparison. aInfo / aErr are os.Stat(a)'s
+// results; cleanA is filepath.Clean(a) and resolvedA is resolvePath(a). The
+// os.SameFile branch is taken only when aErr is nil and b also stats; otherwise
+// BOTH of a's forms are compared against b's cleaned form, so a path that equals
+// b only after symlink resolution is still caught when os.SameFile cannot confirm
+// identity (the degraded Windows loadFileId path, or an un-openable directory).
+func sameDirWithInfo(aInfo os.FileInfo, aErr error, cleanA, resolvedA, b string) bool {
+	if aErr == nil {
+		if bi, err := os.Stat(b); err == nil && os.SameFile(aInfo, bi) {
+			return true
+		}
+	}
+	cleanB := filepath.Clean(b)
+	return pathsEqual(cleanA, cleanB) || pathsEqual(resolvedA, cleanB)
+}
+
+// matchesRefusedRoot reports whether dir is one of the refusedRoots. The fast
+// path is an exact cleaned/resolved map lookup; otherwise each refused root is
+// compared with sameDir, which handles every case-insensitive match: via
+// os.SameFile when both paths exist on disk (resolving case, 8.3 short names,
+// and symlinks) and via a cleaned + case-folded-on-Windows string compare when
+// a path is absent. A separate EqualFold scan would be dead code here — on a
+// case-insensitive filesystem os.SameFile already matches case variants of an
+// existing root, and sameDir's fallback already case-folds an absent one.
+func matchesRefusedRoot(dir, clean, resolved string) bool {
+	dirInfo, dirErr := os.Stat(dir)
+	return matchesRefusedRootWithInfo(dirInfo, dirErr, clean, resolved)
+}
+
+// matchesRefusedRootWithInfo is matchesRefusedRoot with dir's os.Stat result
+// supplied by the caller. The loop compares dir against every refused root, so
+// statting dir once here — rather than once per root inside sameDir — removes up
+// to len(refusedRoots) redundant syscalls per call.
+func matchesRefusedRootWithInfo(dirInfo os.FileInfo, dirErr error, clean, resolved string) bool {
+	if refusedRoots[clean] || refusedRoots[resolved] {
+		return true
+	}
+	for root := range refusedRoots {
+		if sameDirWithInfo(dirInfo, dirErr, clean, resolved, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// systemTempDirs returns the cleaned and symlink-resolved temporary directories
+// that must never be an index root: os.TempDir(), the %TEMP%/%TMP% environment
+// values on Windows, and — also on Windows — the SYSTEM account's temp dir
+// %SystemRoot%\Temp (typically C:\WINDOWS\TEMP). The system temp tree is large,
+// machine-managed, and routinely full of unrelated nested git repositories (test
+// fixtures, clones), so indexing it walks the entire tree.
+func systemTempDirs() []string {
+	var dirs []string
+	seen := make(map[string]bool)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		for _, c := range []string{filepath.Clean(p), resolvePath(p)} {
+			if c != "" && !seen[c] {
+				seen[c] = true
+				dirs = append(dirs, c)
+			}
+		}
+	}
+	add(os.TempDir())
+	if runtime.GOOS == "windows" {
+		add(os.Getenv("TEMP"))
+		add(os.Getenv("TMP"))
+		// A service or background process receives a SYSTEM temp dir as its
+		// os.TempDir() — the 2026-06-19 incident's index root. Per the Win32
+		// temp-path resolution (GetTempPath: %TMP% -> %TEMP% -> %USERPROFILE% ->
+		// Windows dir; GetTempPath2 for SYSTEM processes: %SystemRoot%\SystemTemp,
+		// or the SystemTemp env override) the machine-level temp dirs are
+		// %SystemRoot%\Temp (legacy) and %SystemRoot%\SystemTemp. Refuse them
+		// regardless of this process's TEMP/TMP, so they are caught even when
+		// lumen runs as a normal user whose os.TempDir() points elsewhere (e.g.
+		// %LOCALAPPDATA%\Temp) — the case that fails only on a clean host, not on
+		// the incident machine where os.TempDir() already was C:\WINDOWS\TEMP.
+		add(os.Getenv("SystemTemp"))
+		if sysRoot := os.Getenv("SystemRoot"); sysRoot != "" {
+			add(filepath.Join(sysRoot, "Temp"))
+			add(filepath.Join(sysRoot, "SystemTemp"))
+		}
+	}
+	// Env-independent backstop: refuse the canonical Windows machine-temp roots by
+	// directory identity even when %SystemRoot%/%TEMP%/%TMP% are unset or point
+	// elsewhere (e.g. a normal user whose os.TempDir() is %LOCALAPPDATA%\Temp). The
+	// %SystemRoot%-derived entries above handle a non-default SystemDrive (Windows
+	// not on C:); these literals cover the canonical C:\Windows install regardless
+	// of environment. IsRootUnindexable matches them via os.SameFile on Windows
+	// (invariant to case and 8.3 short names) and via the case-folded string
+	// fallback otherwise; on non-Windows hosts they are inert literals that match
+	// no real directory.
+	add(`C:\Windows\Temp`)
+	add(`C:\Windows\SystemTemp`)
+	return dirs
+}
+
 // IsRootUnindexable reports whether dir is unsuitable as a Lumen index root.
 // When true, the returned string is a short human-readable reason suitable for
 // inclusion in an error message. When false, the reason is empty.
 //
-// Two checks combine:
+// Four checks combine, in order:
 //
-//  1. Hardcoded refusal list — filesystem roots ($HOME, /, /Users, /tmp,
-//     /var, /etc, /usr, /Applications, /Library and macOS /private/* twins)
-//     that should never be project roots regardless of user config.
-//  2. .lumenignore probe — if dir/.lumenignore contains patterns broad
-//     enough to match every file (e.g. "**", "**/*", "*"), the user has
-//     declared the directory un-indexable at its boundary.
+//  1. Hardcoded refusal list — filesystem roots (/, /Users, /tmp, /var, /etc,
+//     /usr, /Applications, /Library, the macOS /private/* twins, and the
+//     Windows C:\, C:\Windows, … entries) that should never be project roots.
+//  2. $HOME — the user's home directory, resolved separately so a symlink to it
+//     is also refused.
+//  3. System temporary directory — os.TempDir(), %TEMP%/%TMP%, the Windows
+//     SYSTEM temp dirs, and the env-independent C:\Windows\Temp / \SystemTemp
+//     literals (the 2026-06-19 runaway-indexing guard).
+//  4. .lumenignore catch-all probe — if dir/.lumenignore contains patterns broad
+//     enough to match every file (e.g. "**", "**/*", "*"), the user has declared
+//     the directory un-indexable at its boundary.
+//
+// Checks 1–3 match by directory identity (os.SameFile, with a case-folded /
+// resolved string fallback), so a project nested under any of them is unaffected.
 //
 // Without these guards the indexer walks the entire tree, ignores every
 // file, produces an empty index, and on macOS triggers TCC prompts along
@@ -357,17 +503,36 @@ func IsRootUnindexable(dir string) (bool, string) {
 	// while the cleaned-input check keeps "/etc" itself matching.
 	clean := filepath.Clean(dir)
 	resolved := resolvePath(dir)
-	if refusedRoots[clean] || refusedRoots[resolved] {
+	// Stat dir once and thread the result through every identity comparison below
+	// (refused roots, $HOME, each system temp dir) so dir is not re-stat'd once
+	// per candidate.
+	dirInfo, dirErr := os.Stat(dir)
+	if matchesRefusedRootWithInfo(dirInfo, dirErr, clean, resolved) {
 		return true, "hardcoded system root"
 	}
+	// Compare dir's cleaned and resolved forms against both home and home's
+	// resolved form (4-way), so a symlink to $HOME is refused even on the degraded
+	// path where os.SameFile cannot confirm identity.
 	if home, err := os.UserHomeDir(); err == nil {
-		homeClean := filepath.Clean(home)
-		homeResolved := resolvePath(home)
-		if homeClean == clean || homeClean == resolved || homeResolved == clean || homeResolved == resolved {
+		if sameDirWithInfo(dirInfo, dirErr, clean, resolved, home) ||
+			sameDirWithInfo(dirInfo, dirErr, clean, resolved, resolvePath(home)) {
 			return true, "user home directory"
 		}
 	}
+	// systemTempDirs already yields both the cleaned and resolved form of each
+	// temp dir, so threading dir's resolved form here completes the 4-way match.
+	for _, tmp := range systemTempDirs() {
+		if sameDirWithInfo(dirInfo, dirErr, clean, resolved, tmp) {
+			return true, "system temporary directory"
+		}
+	}
 
+	// A missing .lumenignore (the common case) and a present-but-unreadable one
+	// both yield "no catch-all declared" (indexable): go-gitignore's
+	// CompileIgnoreFile errors only on I/O / not-exist (any byte content compiles
+	// as patterns), and refusing a whole project because one optional ignore file
+	// is unreadable would be worse than proceeding — the per-directory walk
+	// re-reads it and honors whatever it can.
 	gi, err := ignore.CompileIgnoreFile(filepath.Join(dir, ".lumenignore"))
 	if err != nil || gi == nil {
 		return false, ""
@@ -393,7 +558,12 @@ func MakeSkipWithExtra(rootDir string, exts []string, extraSkipDirs []string) Sk
 	if len(extraSkipDirs) > 0 {
 		tree.extraSkipDirs = make(map[string]bool, len(extraSkipDirs))
 		for _, p := range extraSkipDirs {
-			tree.extraSkipDirs[filepath.Clean(p)] = true
+			// Key on the slash-normalized form so the lookup in shouldSkip is
+			// separator-agnostic. The walk's relPath is backslash on Windows
+			// (filepath.Rel) while these entries come from filepath.Rel/Clean of
+			// caller paths; normalizing both sides keeps nested-repo and internal
+			// worktree exclusion working after merkle keys are slash-normalized.
+			tree.extraSkipDirs[filepath.ToSlash(filepath.Clean(p))] = true
 		}
 	}
 	return tree.shouldSkip

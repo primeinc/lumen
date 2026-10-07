@@ -49,7 +49,11 @@ var (
 // is set, it writes got to the golden file instead.
 func assertGolden(t *testing.T, goldenPath, got string) {
 	t.Helper()
-	got = strings.TrimRight(got, "\n")
+	// Normalize CRLF -> LF so the comparison is line-ending agnostic. On Windows
+	// the golden and snippet testdata files may be checked out with CRLF (git
+	// autocrlf) while formatSearchResults emits LF; the format under test does not
+	// depend on line endings.
+	got = strings.TrimRight(strings.ReplaceAll(got, "\r\n", "\n"), "\n")
 	if *updateGolden {
 		if err := os.WriteFile(goldenPath, []byte(got+"\n"), 0o644); err != nil {
 			t.Fatalf("update golden: %v", err)
@@ -60,7 +64,7 @@ func assertGolden(t *testing.T, goldenPath, got string) {
 	if err != nil {
 		t.Fatalf("read golden file: %v", err)
 	}
-	want := strings.TrimRight(string(golden), "\n")
+	want := strings.TrimRight(strings.ReplaceAll(string(golden), "\r\n", "\n"), "\n")
 	if got != want {
 		t.Fatalf("output does not match golden file %s (run with -update-golden to refresh).\n\nGOT:\n%s\n\nWANT:\n%s", goldenPath, got, want)
 	}
@@ -154,12 +158,12 @@ func TestIndexerCache_FindEffectiveRoot(t *testing.T) {
 
 	t.Run("returns cached parent", func(t *testing.T) {
 		ic := &indexerCache{
-			cache:    map[string]cacheEntry{"/project": {idx: nil, effectiveRoot: "/project"}},
+			cache:    map[string]cacheEntry{tp("/project"): {idx: nil, effectiveRoot: tp("/project")}},
 			embedder: &stubEmbedder{model: model},
 		}
-		root := ic.findEffectiveRoot("/project/src/pkg")
-		if root != "/project" {
-			t.Fatalf("expected /project (cached parent), got %s", root)
+		root := ic.findEffectiveRoot(tp("/project/src/pkg"))
+		if root != tp("/project") {
+			t.Fatalf("expected %s (cached parent), got %s", tp("/project"), root)
 		}
 	})
 
@@ -168,7 +172,7 @@ func TestIndexerCache_FindEffectiveRoot(t *testing.T) {
 		t.Setenv("XDG_DATA_HOME", tmpDir)
 
 		// Create the DB file that would exist for /project with our model.
-		parentDBPath := config.DBPathForProject("/project", model)
+		parentDBPath := config.DBPathForProject(tp("/project"), model)
 		if err := os.MkdirAll(filepath.Dir(parentDBPath), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -180,9 +184,9 @@ func TestIndexerCache_FindEffectiveRoot(t *testing.T) {
 			cache:    make(map[string]cacheEntry),
 			embedder: &stubEmbedder{model: model},
 		}
-		root := ic.findEffectiveRoot("/project/src/pkg")
-		if root != "/project" {
-			t.Fatalf("expected /project (db on disk), got %s", root)
+		root := ic.findEffectiveRoot(tp("/project/src/pkg"))
+		if root != tp("/project") {
+			t.Fatalf("expected %s (db on disk), got %s", tp("/project"), root)
 		}
 	})
 
@@ -509,10 +513,14 @@ func TestIndexerCache_GetOrCreate_WorktreePathIgnoresPreferredRoot(t *testing.T)
 	}
 
 	// cwd=parentRepo is passed as preferredRoot (the outer monorepo).
-	_, effectiveRoot, _, err := ic.getOrCreate(worktreePath, parentRepo)
+	idx, effectiveRoot, _, err := ic.getOrCreate(worktreePath, parentRepo)
 	if err != nil {
 		t.Fatalf("getOrCreate: %v", err)
 	}
+	// Close the cached indexer's DB handle before the temp dir is removed:
+	// Windows cannot delete an open SQLite file, so a leaked handle fails the
+	// t.TempDir cleanup.
+	t.Cleanup(func() { _ = idx.Close() })
 
 	// When path is a git worktree, the effective root must be the worktree
 	// path, not the outer repo. Using the parent causes the entire monorepo to
@@ -595,22 +603,22 @@ func TestValidateSearchInput_CwdPathInteraction(t *testing.T) {
 	}{
 		{
 			name:     "cwd only — path defaults to cwd",
-			input:    SemanticSearchInput{Cwd: "/project", Query: "test"},
-			wantPath: "/project",
+			input:    SemanticSearchInput{Cwd: tp("/project"), Query: "test"},
+			wantPath: tp("/project"),
 		},
 		{
 			name:     "path only — works as before",
-			input:    SemanticSearchInput{Path: "/project/src", Query: "test"},
-			wantPath: "/project/src",
+			input:    SemanticSearchInput{Path: tp("/project/src"), Query: "test"},
+			wantPath: tp("/project/src"),
 		},
 		{
 			name:     "both valid — path under cwd",
-			input:    SemanticSearchInput{Cwd: "/project", Path: "/project/src", Query: "test"},
-			wantPath: "/project/src",
+			input:    SemanticSearchInput{Cwd: tp("/project"), Path: tp("/project/src"), Query: "test"},
+			wantPath: tp("/project/src"),
 		},
 		{
 			name:    "both invalid — path outside cwd",
-			input:   SemanticSearchInput{Cwd: "/project", Path: "/other", Query: "test"},
+			input:   SemanticSearchInput{Cwd: tp("/project"), Path: tp("/other"), Query: "test"},
 			wantErr: "path must be equal to or under cwd",
 		},
 		{
@@ -1108,6 +1116,10 @@ func TestEnsureIndexed_SkipsWhenLockHeld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getOrCreate: %v", err)
 	}
+	// Close the indexer's DB handle before the temp dir is removed: Windows
+	// cannot delete an open SQLite file, so a leaked handle fails t.TempDir
+	// cleanup.
+	t.Cleanup(func() { _ = idx.Close() })
 
 	dbPath := config.DBPathForProject(effectiveRoot, ic.embedder.ModelName())
 	lockPath := indexlock.LockPathForDB(dbPath)

@@ -5,6 +5,7 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch: {}
 
 jobs:
   test:
@@ -47,6 +48,47 @@ jobs:
 
       - name: Vet
         run: go vet -tags=fts5 ./...
+
+  test-windows:
+    name: Test (windows, full suite)
+    runs-on: windows-latest
+    if: github.actor != 'release-please[bot]'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # Windows is a first-class, release-governed target (see README "Platform
+      # support" and the windows/amd64 build in .goreleaser.yml), so it runs the
+      # SAME full `go test ./...` as Linux — no -run narrowing, no excluded
+      # packages. This replaces an earlier scoped path-identity gate that hid
+      # Windows-only defects (separator-keyed indexes, scoped-search prefix
+      # mismatch, the console-spawn flag, case-insensitive DB-path identity)
+      # behind a green check because cmd/index/store never ran on Windows.
+      #
+      # The sqlite-vec cgo binding does `#include "sqlite3.h"`, which the
+      # GitHub Windows image does not provide. Rather than fetch the amalgamation
+      # over the network, reuse the header the pinned mattn/go-sqlite3 dependency
+      # already vendors (sqlite3-binding.h) so the build is hermetic and matches
+      # go.mod. The windows-latest image ships a working Mingw-w64 gcc on PATH.
+      # shell: bash makes a failing command fail the step (pwsh would not).
+      - name: Test (full suite, cgo)
+        shell: bash
+        run: |
+          go mod download
+          SRC="$(cygpath -u "$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)")"
+          INC="$(cygpath -m "$PWD")/cgoinc"
+          mkdir -p "$INC"
+          cp "$SRC/sqlite3-binding.h" "$INC/sqlite3.h"
+          gcc --version
+          CGO_ENABLED=1 CC=gcc CGO_CFLAGS="-I$INC" \
+            go test -tags=fts5 -p 1 -timeout=30m ./...
+          # Vet the windows-tagged code paths the Linux vet job never compiles.
+          CGO_ENABLED=1 CC=gcc CGO_CFLAGS="-I$INC" go vet -tags=fts5 ./...
 
   lint:
     name: Lint

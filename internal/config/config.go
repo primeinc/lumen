@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 const (
@@ -42,8 +44,27 @@ func DBPathForProject(projectPath, model string) string {
 // using an explicit data directory instead of reading XDG_DATA_HOME from the
 // environment. Safe to call from parallel goroutines.
 func DBPathForProjectBase(dataDir, projectPath, model string) string {
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(projectPath+"\x00"+model+"\x00"+IndexVersion)))
+	key := canonicalProjectKey(projectPath)
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(key+"\x00"+model+"\x00"+IndexVersion)))
 	return filepath.Join(dataDir, "lumen", hash[:16], "index.db")
+}
+
+// canonicalProjectKey normalizes a project path into the stable form used to
+// derive the per-project DB hash, so the same directory always maps to the same
+// index regardless of how the path was spelled. On Windows — a case-insensitive
+// filesystem that also accepts forward slashes — C:\Repo, c:\repo, and C:/Repo
+// all denote one directory, so the key folds both case and separators;
+// otherwise paths are case-sensitive and only the separator is cleaned. For the
+// already-absolute, cleaned paths callers pass on Unix this is the identity
+// transform, so existing Unix indexes keep their current hash and are not
+// rebuilt. On Windows it canonicalizes case so two differently-cased spellings
+// of one repo no longer create duplicate, mutually-invisible indexes.
+func canonicalProjectKey(projectPath string) string {
+	p := filepath.Clean(projectPath)
+	if runtime.GOOS == "windows" {
+		p = strings.ToLower(filepath.ToSlash(p))
+	}
+	return p
 }
 
 // XDGDataDir returns the XDG data home directory, defaulting to
